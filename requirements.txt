@@ -1,12 +1,14 @@
-torch>=2.0
+torch
 torchvision
 torchaudio
+torch-sparse
+torch-scatter
 gym
 numpy
 pettingzoo
 matplotlib!=3.7.2
 tqdm
-networkx>=3.1
+networkx
 tensorboard
 tables
 gymnasium
