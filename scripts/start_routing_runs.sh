@@ -1,14 +1,14 @@
 #!/bin/bash
-#PBS -l select=1:ncpus=1:mem=32gb
-#PBS -l walltime=00:30:00
+#PBS -l select=1:ncpus=1:ngpus=1:mem=48gb
+#PBS -l walltime=03:00:00
 #PBS -o /rds/general/user/mss124/home/thesis/job_o
-#PBS -e  /rds/general/user/mss124/home/thesis/job_e
+#PBS -e /rds/general/user/mss124/home/thesis/job_e
 
 cd "$PBS_O_WORKDIR"
 
 module purge
 module load tools/prod
-module load Python/3.9.6-GCCcore-11.2.0
+module load Python/3.10.4-GCCcore-11.3.0
 source ~/thesis/marl/bin/activate
 
 echo "Running in: $(pwd)"
@@ -41,15 +41,15 @@ run() {
 
 time (
 # Graphs G_A, G_B, G_C, selected
-for seed in 971182936# 923430603 1704443687 324821133
+for seed in 971182936 923430603 1704443687 324821133
 do
-for i in 0# 1 2
+for i in 0 1 2
 do
-run "fixed-nocong-shortest-paths-eval-t$seed-$i" --policy=heuristic --eval --seed=$i --no-congestion --topology-init-seed=$seed --train-topology-allow-eval-seed --episode-steps=300 --random-topology=0 --disable-progressbar --eval-output-dir=${DIR_NAME}/fixed-nocong-shortest-paths-eval-t$seed-$i/eval
-run "fixed-nocong-dqn-t$seed-$i" --seed=$i --no-congestion --topology-init-seed=$seed --train-topology-allow-eval-seed --episode-steps=300 --model=dqn --random-topology=0 $BASE_PARAMS $LIMITS
-run "fixed-nocong-dqnr-t$seed-$i" --seed=$i --no-congestion --topology-init-seed=$seed --train-topology-allow-eval-seed --episode-steps=300 --model=dqnr --random-topology=0 $BASE_PARAMS $RECURRENT $LIMITS
-run "fixed-nocong-commnet-t$seed-$i" --seed=$i --no-congestion --topology-init-seed=$seed --train-topology-allow-eval-seed --episode-steps=300 --model=commnet --random-topology=0 $BASE_PARAMS $RECURRENT $LIMITS
-run "fixed-nocong-dgn-t$seed-$i" --seed=$i --no-congestion --topology-init-seed=$seed --train-topology-allow-eval-seed --episode-steps=300 --model=dgn --random-topology=0 $BASE_PARAMS $LIMITS
+#run "fixed-nocong-shortest-paths-eval-t$seed-$i" --policy=heuristic --eval --seed=$i --no-congestion --topology-init-seed=$seed --train-topology-allow-eval-seed --episode-steps=300 --random-topology=0 --disable-progressbar --eval-output-dir=${DIR_NAME}/fixed-nocong-shortest-paths-eval-t$seed-$i/eval
+#run "fixed-nocong-dqn-t$seed-$i" --seed=$i --no-congestion --topology-init-seed=$seed --train-topology-allow-eval-seed --episode-steps=300 --model=dqn --random-topology=0 $BASE_PARAMS $LIMITS
+#run "fixed-nocong-dqnr-t$seed-$i" --seed=$i --no-congestion --topology-init-seed=$seed --train-topology-allow-eval-seed --episode-steps=300 --model=dqnr --random-topology=0 $BASE_PARAMS $RECURRENT $LIMITS
+#run "fixed-nocong-commnet-t$seed-$i" --seed=$i --no-congestion --topology-init-seed=$seed --train-topology-allow-eval-seed --episode-steps=300 --model=commnet --random-topology=0 $BASE_PARAMS $RECURRENT $LIMITS
+#run "fixed-nocong-dgn-t$seed-$i" --seed=$i --no-congestion --topology-init-seed=$seed --train-topology-allow-eval-seed --episode-steps=300 --model=dgn --random-topology=0 $BASE_PARAMS $LIMITS
 
 run "fixed-shortest-paths-eval-t$seed-$i" --policy=heuristic --eval --seed=$i --topology-init-seed=$seed --train-topology-allow-eval-seed --episode-steps=300 --random-topology=0 --disable-progressbar --eval-output-dir=${DIR_NAME}/fixed-shortest-paths-eval-t$seed-$i/eval
 run "fixed-dqn-t$seed-$i" --seed=$i --topology-init-seed=$seed --train-topology-allow-eval-seed --episode-steps=300 --model=dqn --random-topology=0 $BASE_PARAMS $LIMITS

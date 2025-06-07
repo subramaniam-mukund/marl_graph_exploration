@@ -2,11 +2,10 @@ torch
 torchvision
 torchaudio
 torch-sparse
-torch-scatter
 gym
 numpy
 pettingzoo
-matplotlib!=3.7.2
+matplotlib
 tqdm
 networkx
 tensorboard
