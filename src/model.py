@@ -125,6 +125,20 @@ class Q_Net(nn.Module):
         return self.fc(x)
 
 
+class RNDNetwork(nn.Module):
+    def __init__(self, input_dim, output_dim=16, hidden_dim=64):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.LeakyReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.LeakyReLU(),
+            nn.Linear(hidden_dim, output_dim)
+        )
+    def forward(self, x):
+        return self.net(x)
+
+
 class DGN(nn.Module):
     def __init__(
         self,
@@ -168,10 +182,11 @@ class DGN(nn.Module):
 
         self.q_net = Q_Net(hidden_features * (num_attention_layers + 1), num_actions)
         self.att_weights = []
+        self.hidden = None
 
     def forward(self, x, mask):
         h = self.encoder(x)
-
+        # x.shape: torch.Size([1, 20, 130]), mask.shape: torch.Size([1, 20, 20]), h.shape: torch.Size([1, 20, 256])
         q_input = h
         self.att_weights.clear()
         for attention_layer in self.att_layers:
@@ -179,7 +194,7 @@ class DGN(nn.Module):
             self.att_weights.append(att_weights)
             # concatenate outputs like described in the paper & official implementation
             q_input = torch.cat((q_input, h), dim=-1)
-
+            self.hidden = h # torch.Size([1, 20, 256]) (batch_size, num_agents, hidden_dim)
         q = self.q_net(q_input)
         return q
 
