@@ -15,7 +15,7 @@ import torch.nn.functional as F
 import torch.optim as optim
 from eval import evaluate
 from replaybuffer import ReplayBuffer
-from model import DGN, DQNR, DQN, MLP, CommNet, NetMon
+from model import DGN, DQNR, DQN, MLP, CommNet, NetMon, RNDNetwork
 from env.routing import Routing
 
 from env.simple_environment import SimpleEnvironment
@@ -282,6 +282,20 @@ parser.add_argument(
     default=0.0,
 )
 parser.add_argument(
+    "--intrinsic-coeff",
+    type=float,
+    help="Intrinsic loss coefficient to enable self-supervised learning during RL",
+    dest="intrinsic_coeff",
+    default=0.0,
+)
+parser.add_argument(
+    "--rnd-network",
+    type=bool,
+    help="True if RNDNetwork is being used for intrinsic reward calculation, False if not",
+    dest="rnd_network",
+    default=False,
+)
+parser.add_argument(
     "--target-update-steps",
     type=int,
     help="Number of steps between target model updates (smooth updates for 0)",
@@ -443,42 +457,20 @@ activation_function = getattr(F, args.activation_function)
 n_agents, agent_obs_size, n_nodes, node_obs_size = reset_and_get_sizes(env)
 
 # optionally create netmon
-if args.netmon:
-    netmon = NetMon(
-        node_obs_size,
-        args.netmon_dim,
-        dim_str_to_list(args.netmon_encoder_dim),
-        args.netmon_iterations,
-        activation_fn=activation_function,
-        rnn_type=args.netmon_rnn_type,
-        rnn_carryover=args.netmon_rnn_carryover,
-        agg_type=args.netmon_agg_type,
-        output_neighbor_hidden=True,
-        output_global_hidden=args.netmon_global,
-    ).to(args.device)
-    summary_node_obs = torch.tensor(
-        env.get_node_observation(), dtype=torch.float32, device=args.device
-    ).unsqueeze(0)
-    summary_node_adj = torch.tensor(
-        env.get_nodes_adjacency(), dtype=torch.float32, device=args.device
-    ).unsqueeze(0)
-    summary_node_agent = torch.tensor(
-        env.get_node_agent_matrix(), dtype=torch.float32, device=args.device
-    ).unsqueeze(0)
-    netmon_summary = netmon.summarize(
-        summary_node_obs, summary_node_adj, summary_node_agent
-    )
+netmon = None
+n_nodes = node_obs_size = node_state_size = node_aux_size = 0
 
-    node_state_size = netmon.get_state_size()
-    node_aux_size = 0 if env.get_node_aux() is None else len(env.get_node_aux()[0])
+# optionally create RNDNetwork
+if args.rnd_network:
+    target_model_rnd = RNDNetwork(256).to(args.device) #change to be hidden dim later
+    model_rnd = RNDNetwork(256).to(args.device) #change to be hidden dim later
 
-    # wrap whole environment with netmon. All agents on this environment will
-    # automatically use observations from netmon
-    env = NetMonWrapper(env, netmon, args.netmon_startup_iterations)
-    _, agent_obs_size, _, _ = reset_and_get_sizes(env)
+    for param in target_model_rnd.parameters():
+        param.requires_grad = False
+
 else:
-    netmon = None
-    n_nodes = node_obs_size = node_state_size = node_aux_size = 0
+    target_model_rnd = None
+    model_rnd = None
 
 hidden_dim = dim_str_to_list(args.hidden_dim)
 
@@ -547,8 +539,6 @@ else:
 if args.eval:
     print(f"Policy: {type(policy).__name__}")
     model.eval()
-    if netmon is not None:
-        netmon.eval()
 
     if isinstance(env.get(), Routing) and args.random_topology:
         env.get().network.seeds = EVAL_SEEDS
@@ -579,19 +569,10 @@ assert (
     args.policy == "trained"
 ), f"Given policy {args.policy} cannot be used for training."
 
-if netmon is None:
-    parameters = list(model.parameters())
+if model_rnd is not None:
+    parameters = list(model.parameters()) + list(model_rnd.parameters())
 else:
-    parameters = list(model.parameters()) + list(netmon.parameters())
-    if node_aux_size > 0 and args.aux_loss_coeff > 0:
-        aux_model = MLP(
-            node_state_size,
-            (node_state_size, node_aux_size),
-            activation_function,
-            activation_on_output=False,
-        )
-        aux_model = aux_model.to(args.device)
-        parameters = parameters + list(aux_model.parameters())
+    parameters = list(model.parameters())
 
 optimizer = optim.AdamW(parameters, lr=args.lr)
 
@@ -627,8 +608,7 @@ else:
     comment += "Simple"
 
 comment += f"_{type(model).__name__}"
-if netmon is not None:
-    comment += "_netmon"
+
 if args.comment != "":
     comment += f"_{args.comment}"
 
@@ -648,8 +628,6 @@ try:
         f"Model type: {type(model).__name__}"
         f"{'' if not model_has_state else ' (stateful)'}"
     )
-    if netmon is not None:
-        print(netmon_summary)
     print(env)
     if model_has_state and args.sequence_length <= 1:
         print("Warning: Training stateful model with sequence length 1.")
@@ -671,8 +649,6 @@ try:
         disable=args.disable_progressbar,
     ):
         model.eval()
-        if netmon is not None:
-            netmon.eval()
 
         if episode_step is None or episode_done:
             # reset episode
@@ -688,16 +664,6 @@ try:
         if model_has_state:
             model.state = last_state
 
-        if netmon is not None:
-            buffer_node_state = (
-                env.last_netmon_state.cpu().detach().numpy()
-                if env.last_netmon_state is not None
-                else 0
-            )
-            netmon_info = env.get_netmon_info()
-            if hasattr(env, "get_node_aux"):
-                buffer_node_aux = env.get_node_aux()
-
         # get actions and execute step in environment (note: changes model states)
         joint_actions = policy(obs, adj)
 
@@ -710,9 +676,6 @@ try:
                 1, -1, 1
             )
             last_state = model.state * done_mask
-
-        if netmon is not None:
-            next_netmon_info = env.get_netmon_info()
 
         episode_step += 1
         episode_done = episode_step >= args.episode_steps
@@ -751,17 +714,8 @@ try:
         if step % log_buffer_size == 0:
             base_path = Path(writer.get_logdir())
             if args.debug_plots:
-                if netmon is not None:
-                    buff.save_node_state_diff_plot(
-                        base_path / f"z_img_node_diff_{step}.png",
-                        buffer_plot_last_n,
-                    )
-                    buff.save_node_state_std_plot(
-                        base_path / f"z_img_node_std_{step}.png", buffer_plot_last_n
-                    )
-                if (netmon is not None and isinstance(env.env, Routing)) or isinstance(
-                    env, Routing
-                ):
+    
+                if isinstance(env, Routing):
                     if env.record_distance_map:
                         env.save_distance_map_plot(
                             base_path / f"z_img_spawn_distance_{step}.png"
@@ -823,19 +777,18 @@ try:
         ):
             continue
 
-        # if (step % 1000) == 0:
-        #     eval(env, EpsilonGreedy(env, model, env.actionspace.n, args), args)
-
         # training
         training_iteration += 1
 
         loss_q = torch.zeros(1, device=args.device)
         loss_aux = torch.zeros(1, device=args.device)
         loss_att = torch.zeros(1, device=args.device)
+        loss_intr = torch.zeros(1, device=args.device)
+        r_intrinsic_per_agent = torch.zeros(1, device=args.device)
 
         model.train()
-        if netmon is not None:
-            netmon.train()
+        if model_rnd is not None:
+            model_rnd.train()
 
         for t, batch in enumerate(
             buff.get_batch(
@@ -848,50 +801,6 @@ try:
                 # load the state from the beginning
                 model.state = batch.agent_state
 
-            if netmon is not None:
-                if t == 0:
-                    # get state from batch
-                    netmon.state = batch.node_state
-                else:
-                    # reset netmon state if env episode was done in this step
-                    netmon.state = last_netmon_state * (  # noqa: F821
-                        ~last_batch_episode_done  # noqa: F821
-                    ).view(-1, 1, 1)
-
-                    # replace node state with newly calculated netmon state
-                    # buff.node_state[batch.idx] = netmon.state.detach().cpu().numpy()
-
-                # run netmon step
-                network_obs = netmon(
-                    batch.node_obs, batch.node_adj, batch.node_agent_matrix
-                )
-
-                # netmon aux loss
-                if aux_model is not None:
-                    aux_prediction = aux_model(netmon.state)
-                    loss_aux = (
-                        loss_aux
-                        + torch.mean((aux_prediction - batch.node_aux) ** 2)
-                        / args.sequence_length
-                    )
-
-                # replace observation in place
-                net_obs_dim = network_obs.shape[-1]
-                batch.obs[:, :, -net_obs_dim:] = network_obs
-
-                # if t > 0:
-                #     # update buffer
-                #     # buff.next_obs[prev_idx][..., -net_obs_dim:] = (
-                #     #     network_obs.detach().cpu().numpy()
-                #     # )
-                #     buff.next_obs[last_batch_idx] = batch.obs.detach().cpu().numpy()
-
-                # remember true netmon state for gradient calculation
-                last_netmon_state = netmon.state
-                # done episodes for correct masking
-                last_batch_episode_done = batch.episode_done
-                last_batch_idx = batch.idx
-
             q_values = model(batch.obs, batch.adj)
 
             # run target module
@@ -900,22 +809,24 @@ try:
                     # hack: set state of target model to next state of current model
                     # with this, we avoid having to store state & next state
                     model_tar.state = model.state.detach()
-
-                if netmon is not None:
-                    # note that we use the netmon state from the current model here.
-                    # not sure if that is really necessary, we could also save the
-                    # next state in the transition tuple and predict current & next
-                    # network observations with a single netmon invocation.
-                    next_network_obs = netmon(
-                        batch.next_node_obs,
-                        batch.next_node_adj,
-                        batch.next_node_agent_matrix,
-                    )
-                    next_net_obs_dim = next_network_obs.shape[-1]
-                    batch.next_obs[:, :, -next_net_obs_dim:] = next_network_obs
-
+            
                 next_q = model_tar(batch.next_obs, batch.next_adj)
                 next_q_max = next_q.max(dim=2)[0]
+
+                if args.rnd_network:
+                    rnd_target_output = target_model_rnd(model_tar.hidden)
+                    rnd_predictor_output = model_rnd(model_tar.hidden)
+
+                    # Calculate intrinsic reward: L2 squared distance
+                    # This gives a reward for each agent in the batch
+                    r_intrinsic_per_agent = torch.sum(
+                        torch.pow(rnd_predictor_output - rnd_target_output, 2),
+                        dim=-1
+                    ) # Shape: (batch_size, num_agents)
+
+                    # This loss is minimized to train the predictor network
+                    rnd_loss = F.mse_loss(rnd_predictor_output, rnd_target_output)
+                    loss_intr = loss_intr + rnd_loss / args.sequence_length
 
             if model_has_state:
                 # mask agent state when the next step belongs to a new episode
@@ -928,8 +839,9 @@ try:
             # DQN target with 1 step bootstrapping
             # we do not use batch.episode_done here, as the next observation
             # from this transition still belongs to the same episode (i.e. is valid)
+            combined_reward = batch.reward + r_intrinsic_per_agent
             chosen_action_target_q = (
-                batch.reward + (~batch.done) * args.gamma * next_q_max
+                combined_reward + (~batch.done) * args.gamma * next_q_max # Use combined_reward
             )
 
             # original DGN loss on all actions, even unused ones
@@ -997,7 +909,13 @@ try:
             loss_q
             + args.att_regularization_coeff * loss_att
             + args.aux_loss_coeff * loss_aux
+            + args.intrinsic_coeff * loss_intr
         )
+
+        print("losses: ", loss_q, loss_att, loss_aux, loss_intr)
+        print("rewards: ", r_intrinsic_per_agent.mean().mean(), r_intrinsic_per_agent.shape)
+        print("\n")
+
         optimizer.zero_grad()
         loss.backward()
         # clip based on https://stackoverflow.com/questions/69427103/gradient-exploding-problem-in-a-graph-neural-network
@@ -1042,8 +960,9 @@ finally:
             # first reset model & netmon state
             if hasattr(model, "state"):
                 model.state = None
-            if netmon is not None:
-                netmon.state = None
+            
+            if model_rnd is not None and hasattr(model_rnd, "state"):
+                model_rnd.state = None
 
             # evaluate
             if isinstance(env.get(), Routing) and args.random_topology:

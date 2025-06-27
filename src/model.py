@@ -126,12 +126,10 @@ class Q_Net(nn.Module):
 
 
 class RNDNetwork(nn.Module):
-    def __init__(self, input_dim, output_dim=16, hidden_dim=64):
+    def __init__(self, input_dim, output_dim=32, hidden_dim=64):
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
-            nn.LeakyReLU(),
-            nn.Linear(hidden_dim, hidden_dim),
             nn.LeakyReLU(),
             nn.Linear(hidden_dim, output_dim)
         )
