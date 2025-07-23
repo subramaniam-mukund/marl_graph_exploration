@@ -5,7 +5,7 @@ import json
 import sys
 import traceback
 from pathlib import Path
-from env.constants import EVAL_SEEDS
+from env.larger_graph_seeds import larger_EVAL_SEEDS as EVAL_SEEDS
 from env.environment import reset_and_get_sizes
 from env.network import Network
 
@@ -15,11 +15,10 @@ import torch.nn.functional as F
 import torch.optim as optim
 from eval import evaluate
 from replaybuffer import ReplayBuffer
-from model import DGN, DQNR, DQN, MLP, CommNet, NetMon, RNDNetwork
+from model import DGN, DQNR, DQN, CommNet, RNDNetwork, RunningMeanStd
 from env.routing import Routing
 
 from env.simple_environment import SimpleEnvironment
-from env.wrapper import NetMonWrapper
 from policy import EpsilonGreedy
 from policy import ShortestPath
 from policy import RandomPolicy, SimplePolicy
@@ -122,64 +121,27 @@ parser.add_argument(
 )
 parser.set_defaults(enable_action_mask=False)
 
-# approach settings
+# intrinsic curiosity settings
 parser.add_argument(
-    "--netmon", help="Enables graph observations", dest="netmon", action="store_true"
+    "--intrinsic-coeff",
+    type=float,
+    help="Intrinsic loss coefficient to enable self-supervised learning during RL",
+    dest="intrinsic_coeff",
+    default=0.0,
 )
 parser.add_argument(
-    "--no-netmon",
-    help="Disables graph observations (default)",
-    dest="netmon",
-    action="store_false",
-)
-parser.set_defaults(netmon=False)
-parser.add_argument(
-    "--netmon-global",
-    help="Enables global pooling of graph observations (only allowed in centralized case)",
-    dest="netmon_global",
-    action="store_true",
-)
-parser.set_defaults(netmon_global=False)
-parser.add_argument(
-    "--netmon-dim", type=int, help="Size of NetMon state and observations", default=128
+    "--rnd-network",
+    type=bool,
+    help="True if RNDNetwork is being used for intrinsic reward calculation, False if not",
+    dest="rnd_network",
+    default=False,
 )
 parser.add_argument(
-    "--netmon-encoder-dim",
-    type=str,
-    help="NetMon encoder dimensions. Examples: '128', '512,128'..",
-    default="512,256",
-)
-parser.add_argument(
-    "--netmon-iterations",
-    type=int,
-    help="Number of NetMon iterations between environment steps",
-    default=3,
-)
-parser.add_argument(
-    "--netmon-startup-iterations",
-    type=int,
-    help="Number of message passing iterations after environment reset (before first step)",
+    "--intr-reward-decay",
+    type=float,
+    help="Intrinsic Reward decay rate (multiplicative)",
+    dest="intr_reward_decay",
     default=1,
-)
-parser.add_argument(
-    "--netmon-rnn-type",
-    type=str,
-    help="NetMon RNN type",
-    default="lstm",
-)
-parser.add_argument(
-    "--netmon-rnn-carryover",
-    type=int,
-    help="Carry over RNN state between RNN modules",
-    # 0: False, 1: True
-    choices=[False, True],
-    default=True,
-)
-parser.add_argument(
-    "--netmon-agg-type",
-    type=str,
-    help="NetMon aggregation function",
-    default="sum",
 )
 
 # model settings
@@ -281,20 +243,7 @@ parser.add_argument(
     help="Auxiliary loss coefficient to enable supervised learning during RL",
     default=0.0,
 )
-parser.add_argument(
-    "--intrinsic-coeff",
-    type=float,
-    help="Intrinsic loss coefficient to enable self-supervised learning during RL",
-    dest="intrinsic_coeff",
-    default=0.0,
-)
-parser.add_argument(
-    "--rnd-network",
-    type=bool,
-    help="True if RNDNetwork is being used for intrinsic reward calculation, False if not",
-    dest="rnd_network",
-    default=False,
-)
+
 parser.add_argument(
     "--target-update-steps",
     type=int,
@@ -464,6 +413,7 @@ n_nodes = node_obs_size = node_state_size = node_aux_size = 0
 if args.rnd_network:
     target_model_rnd = RNDNetwork(256).to(args.device) #change to be hidden dim later
     model_rnd = RNDNetwork(256).to(args.device) #change to be hidden dim later
+    intrinsic_reward_rms = RunningMeanStd(shape=(n_agents,), device=args.device) # <--- MODIFIED LINE
 
     for param in target_model_rnd.parameters():
         param.requires_grad = False
@@ -471,6 +421,7 @@ if args.rnd_network:
 else:
     target_model_rnd = None
     model_rnd = None
+    intrinsic_reward_rms = None
 
 hidden_dim = dim_str_to_list(args.hidden_dim)
 
@@ -785,6 +736,8 @@ try:
         loss_att = torch.zeros(1, device=args.device)
         loss_intr = torch.zeros(1, device=args.device)
         r_intrinsic_per_agent = torch.zeros(1, device=args.device)
+        normalized_r_intrinsic_per_agent = torch.zeros(1, device=args.device)
+        if step % log_buffer_size == 0: args.intr_reward_decay*=args.intr_reward_decay
 
         model.train()
         if model_rnd is not None:
@@ -823,6 +776,14 @@ try:
                         torch.pow(rnd_predictor_output - rnd_target_output, 2),
                         dim=-1
                     ) # Shape: (batch_size, num_agents)
+                    threshold = args.intrinsic_coeff
+                    intrinsic_reward_rms.update(r_intrinsic_per_agent.detach())
+                    normalized_r_intrinsic_per_agent = (
+                    r_intrinsic_per_agent - intrinsic_reward_rms.mean
+                ) / torch.sqrt(intrinsic_reward_rms.var + 1e-8)
+                    normalized_r_intrinsic_per_agent = torch.clamp(
+            normalized_r_intrinsic_per_agent, min=-1*threshold, max=threshold
+        )
 
                     # This loss is minimized to train the predictor network
                     rnd_loss = F.mse_loss(rnd_predictor_output, rnd_target_output)
@@ -839,7 +800,7 @@ try:
             # DQN target with 1 step bootstrapping
             # we do not use batch.episode_done here, as the next observation
             # from this transition still belongs to the same episode (i.e. is valid)
-            combined_reward = batch.reward + r_intrinsic_per_agent
+            combined_reward = batch.reward + args.intr_reward_decay * normalized_r_intrinsic_per_agent
             chosen_action_target_q = (
                 combined_reward + (~batch.done) * args.gamma * next_q_max # Use combined_reward
             )
@@ -852,14 +813,6 @@ try:
                 batch.action.unsqueeze(-1),
                 chosen_action_target_q.unsqueeze(-1),
             )
-
-            # regular DQN loss just on selected actions
-            # q_target = chosen_action_target_q
-            # q_values = torch.gather(
-            #     q_values, -1, batch.action.unsqueeze(-1).cuda()
-            # ).squeeze(-1)
-
-            # combined value loss for each sample in the batch
             td_error = q_values - q_target
 
             # update q-value loss
@@ -909,11 +862,11 @@ try:
             loss_q
             + args.att_regularization_coeff * loss_att
             + args.aux_loss_coeff * loss_aux
-            + args.intrinsic_coeff * loss_intr
+            + loss_intr
         )
 
-        print("losses: ", loss_q, loss_att, loss_aux, loss_intr)
-        print("rewards: ", r_intrinsic_per_agent.mean().mean(), r_intrinsic_per_agent.shape)
+        print("losses: ", loss_q, loss_att, loss_intr)
+        print("rewards: ", normalized_r_intrinsic_per_agent.mean().mean())
         print("\n")
 
         optimizer.zero_grad()
@@ -960,9 +913,6 @@ finally:
             # first reset model & netmon state
             if hasattr(model, "state"):
                 model.state = None
-            
-            if model_rnd is not None and hasattr(model_rnd, "state"):
-                model_rnd.state = None
 
             # evaluate
             if isinstance(env.get(), Routing) and args.random_topology:
