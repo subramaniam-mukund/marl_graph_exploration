@@ -9,6 +9,34 @@ from torch_geometric.nn.summary import summary
 
 from layernormlstm import LayerNormLSTMCell
 
+class RunningMeanStd:
+    def __init__(self, shape, device='cpu'):
+        self.mean = torch.zeros(shape, dtype=torch.float32).to(device)
+        self.var = torch.ones(shape, dtype=torch.float32).to(device)
+        self.count = 1e-4
+
+    def update(self, x):
+        batch_mean = torch.mean(x, dim=0)
+        batch_var = torch.var(x, dim=0)
+        batch_count = x.shape[0]
+
+        self.update_from_moments(batch_mean, batch_var, batch_count)
+
+    def update_from_moments(self, batch_mean, batch_var, batch_count):
+        
+        delta = batch_mean - self.mean
+        total_count = self.count + batch_count
+
+        new_mean = self.mean + delta * batch_count / total_count
+        m_a = self.var * self.count
+        m_b = batch_var * batch_count
+        M2 = m_a + m_b + torch.pow(delta, 2) * self.count * batch_count / total_count
+        new_var = M2 / total_count
+        new_count = total_count
+
+        self.mean = new_mean
+        self.var = new_var
+        self.count = new_count
 
 class MLP(nn.Module):
     def __init__(
@@ -126,12 +154,14 @@ class Q_Net(nn.Module):
 
 
 class RNDNetwork(nn.Module):
-    def __init__(self, input_dim, output_dim=32, hidden_dim=64):
+    def __init__(self, input_dim, output_dim=32, hidden_dim=128):
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
             nn.LeakyReLU(),
-            nn.Linear(hidden_dim, output_dim)
+            nn.Linear(hidden_dim, 64),
+            nn.LeakyReLU(),
+            nn.Linear(64, output_dim)
         )
     def forward(self, x):
         return self.net(x)
