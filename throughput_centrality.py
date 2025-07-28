@@ -202,5 +202,73 @@ else:
             )
             plt.axis('off')
             plt.tight_layout()
-            plt.savefig(f"graph_{label}_centrality_seed_{str_seed}_run_{str_run}.png", dpi=300)
+            #plt.savefig(f"graph_{label}_centrality_seed_{str_seed}_run_{str_run}.png", dpi=300)
             plt.show()
+
+import matplotlib.pyplot as plt
+import networkx as nx
+import numpy as np
+from matplotlib.cm import ScalarMappable
+from matplotlib.colors import Normalize
+
+# Provided seeds and runs (you can update run IDs if needed)
+selected = {
+    "high": ("415127002", "0"),
+    "low": ("1493043848", "0"),
+    "mid": ("256224875", "0")
+}
+
+fig, axes = plt.subplots(1, 3, figsize=(18, 6), constrained_layout=True)
+
+all_centralities = []
+
+graphs_data = {}
+for label, (str_seed, str_run) in selected.items():
+    net = Network(n_nodes=30, provided_seeds=[int(str_seed)])
+    net.reset()
+    G = net.G
+
+    centrality = nx.betweenness_centrality(G)
+    all_centralities.extend(centrality.values())
+
+    graphs_data[label] = {
+        "G": G,
+        "centrality": centrality,
+        "str_seed": str_seed,
+        "str_run": str_run,
+        "min_c": min(centrality.values()),
+        "max_c": max(centrality.values()),
+        "mean_c": np.mean(list(centrality.values()))
+    }
+
+# Normalize color scale across all graphs
+norm = Normalize(vmin=min(all_centralities), vmax=max(all_centralities))
+cmap = plt.cm.viridis
+
+for ax, label in zip(axes, ["low", "mid", "high"]):
+    data = graphs_data[label]
+    G = data["G"]
+    centrality = data["centrality"]
+    node_colors = [centrality[n] for n in G.nodes()]
+    pos = nx.spring_layout(G, seed=42)
+
+    nx.draw_networkx_nodes(G, pos, node_size=300, node_color=node_colors, cmap=cmap, vmin=min(all_centralities), vmax=max(all_centralities), ax=ax)
+    nx.draw_networkx_edges(G, pos, ax=ax, edge_color='black')
+    nx.draw_networkx_labels(G, pos, font_size=8, ax=ax)
+
+    # Title with (min, max, mean) betweenness centrality
+    ax.set_title(
+        f"$G_{{{label.upper()}}}$ "
+        f"({data['min_c']:.2f}, {data['max_c']:.2f}, {data['mean_c']:.2f})",
+        fontsize=14
+    )
+    ax.axis("off")
+
+# Shared colorbar
+sm = ScalarMappable(cmap=cmap, norm=norm)
+sm.set_array([])
+cbar = fig.colorbar(sm, ax=axes, orientation='vertical', fraction=0.025, pad=0.02)
+cbar.set_label("Betweenness centrality", fontsize=12)
+
+plt.savefig("combined_centrality_graphs_with_stats.png", dpi=300)
+plt.show()
