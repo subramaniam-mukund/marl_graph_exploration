@@ -8,6 +8,8 @@ from pathlib import Path
 from env.larger_graph_seeds import larger_EVAL_SEEDS as EVAL_SEEDS
 from env.environment import reset_and_get_sizes
 from env.network import Network
+from env.wrapper import NetMonWrapper
+
 
 import numpy as np
 import torch
@@ -15,7 +17,7 @@ import torch.nn.functional as F
 import torch.optim as optim
 from eval import evaluate
 from replaybuffer import ReplayBuffer
-from model import DGN, DQNR, DQN, CommNet, RNDNetwork, RunningMeanStd
+from model import DGN, DQNR, DQN, CommNet, ST_DGN, RNDNetwork, RunningMeanStd, TarMAC, NetMon, MLP
 from env.routing import Routing
 
 from env.simple_environment import SimpleEnvironment
@@ -121,13 +123,80 @@ parser.add_argument(
 )
 parser.set_defaults(enable_action_mask=False)
 
+# netmon settings
+parser.add_argument(
+    "--netmon", help="Enables graph observations", dest="netmon", action="store_true"
+)
+parser.add_argument(
+    "--no-netmon",
+    help="Disables graph observations (default)",
+    dest="netmon",
+    action="store_false",
+)
+parser.set_defaults(netmon=False)
+parser.add_argument(
+    "--netmon-global",
+    help="Enables global pooling of graph observations (only allowed in centralized case)",
+    dest="netmon_global",
+    action="store_true",
+)
+parser.set_defaults(netmon_global=False)
+parser.add_argument(
+    "--netmon-dim", type=int, help="Size of NetMon state and observations", default=128
+)
+parser.add_argument(
+    "--netmon-encoder-dim",
+    type=str,
+    help="NetMon encoder dimensions. Examples: '128', '512,128'..",
+    default="512,256",
+)
+parser.add_argument(
+    "--netmon-iterations",
+    type=int,
+    help="Number of NetMon iterations between environment steps",
+    default=3,
+)
+parser.add_argument(
+    "--netmon-startup-iterations",
+    type=int,
+    help="Number of message passing iterations after environment reset (before first step)",
+    default=1,
+)
+parser.add_argument(
+    "--netmon-rnn-type",
+    type=str,
+    help="NetMon RNN type",
+    default="lstm",
+)
+parser.add_argument(
+    "--netmon-rnn-carryover",
+    type=int,
+    help="Carry over RNN state between RNN modules",
+    # 0: False, 1: True
+    choices=[False, True],
+    default=True,
+)
+parser.add_argument(
+    "--netmon-agg-type",
+    type=str,
+    help="NetMon aggregation function",
+    default="sum",
+)
+
 # intrinsic curiosity settings
 parser.add_argument(
     "--intrinsic-coeff",
     type=float,
-    help="Intrinsic loss coefficient to enable self-supervised learning during RL",
+    help="Intrinsic reward coefficient to enable self-supervised learning during RL",
     dest="intrinsic_coeff",
     default=0.0,
+)
+parser.add_argument(
+    "--intr-loss-coeff",
+    type=float,
+    help="Intrinsic Loss coefficient to enable self-supervised learning during RL",
+    dest="intr_loss_coeff",
+    default=1.0,
 )
 parser.add_argument(
     "--rnd-network",
@@ -143,13 +212,34 @@ parser.add_argument(
     dest="intr_reward_decay",
     default=1,
 )
+parser.add_argument(
+    "--enable-link-failures",
+    type=bool,
+    help="",
+    dest="enable_link_failures",
+    default=False,
+)
+parser.add_argument(
+    "--link-failure-rate",
+    type=float,
+    help="",
+    dest="link_failure_rate",
+    default=0.0,
+)
+parser.add_argument(
+    "--degree",
+    type=int,
+    help="",
+    dest="degree",
+    default=3,
+)
 
 # model settings
 parser.add_argument(
     "--model",
     type=str,
     help="Base algorithm/model",
-    choices=["dgn", "dqn", "dqnr", "commnet"],
+    choices=["dgn", "dqn", "dqnr", "commnet", "stdgn", "dqrc", "tarmac"],
     default="dgn",
 )
 parser.add_argument(
@@ -176,6 +266,21 @@ parser.add_argument(
     type=int,
     help="Number of agent attention layers (DGN only)",
     default=2,
+)
+parser.add_argument(
+    "--attention-sparsity-type",
+    type=str,
+    help="Type of attention sparsity to apply (e.g., 'topk', 'threshold'). Set to None for no additional sparsity.",
+    dest="attention_sparsity_type",
+    choices=[None, "topk", "threshold"], # None allows no sparsity to be explicitly chosen
+    default=None, # Default to no additional sparsity
+)
+parser.add_argument(
+    "--attention-sparsity-param",
+    type=float, # Using float to allow for threshold, will cast to int for topk
+    help="Parameter for attention sparsity (e.g., k for topk, threshold value for threshold).",
+    dest="attention_sparsity_param",
+    default=None, # No default parameter
 )
 
 # training settings
@@ -383,6 +488,7 @@ network = Network(
     n_random_seeds=args.num_topologies_train,
     topology_init_seed=args.topology_init_seed,
     excluded_seeds=None if args.train_topology_allow_eval_seed else EVAL_SEEDS,
+    degree=args.degree
 )
 
 # define the environment
@@ -394,6 +500,9 @@ if args.env_type == "routing":
         enable_congestion=not args.no_congestion,
         enable_action_mask=args.enable_action_mask,
         ttl=args.ttl,
+        enable_link_failures=args.enable_link_failures,
+        link_failure_rate=args.link_failure_rate,
+        num_actions=args.degree+1
     )
 elif args.env_type == "simple":
     env = SimpleEnvironment(env_var=args.env_var, random_topology=args.random_topology)
@@ -406,8 +515,43 @@ activation_function = getattr(F, args.activation_function)
 n_agents, agent_obs_size, n_nodes, node_obs_size = reset_and_get_sizes(env)
 
 # optionally create netmon
-netmon = None
-n_nodes = node_obs_size = node_state_size = node_aux_size = 0
+if args.netmon:
+    netmon = NetMon(
+        node_obs_size,
+        args.netmon_dim,
+        dim_str_to_list(args.netmon_encoder_dim),
+        args.netmon_iterations,
+        activation_fn=activation_function,
+        rnn_type=args.netmon_rnn_type,
+        rnn_carryover=args.netmon_rnn_carryover,
+        agg_type=args.netmon_agg_type,
+        output_neighbor_hidden=True,
+        output_global_hidden=args.netmon_global,
+    ).to(args.device)
+    summary_node_obs = torch.tensor(
+        env.get_node_observation(), dtype=torch.float32, device=args.device
+    ).unsqueeze(0)
+    summary_node_adj = torch.tensor(
+        env.get_nodes_adjacency(), dtype=torch.float32, device=args.device
+    ).unsqueeze(0)
+    summary_node_agent = torch.tensor(
+        env.get_node_agent_matrix(), dtype=torch.float32, device=args.device
+    ).unsqueeze(0)
+    netmon_summary = netmon.summarize(
+        summary_node_obs, summary_node_adj, summary_node_agent
+    )
+    node_state_size = netmon.get_state_size()
+    node_aux_size = 0 if env.get_node_aux() is None else len(env.get_node_aux()[0])
+
+    # wrap whole environment with netmon. All agents on this environment will
+    # automatically use observations from netmon
+    env = NetMonWrapper(env, netmon, args.netmon_startup_iterations)
+    _, agent_obs_size, _, _ = reset_and_get_sizes(env)
+else:
+    netmon = None
+    n_nodes = node_obs_size = node_state_size = node_aux_size = 0
+
+
 
 # optionally create RNDNetwork
 if args.rnd_network:
@@ -433,6 +577,8 @@ if args.model == "dgn":
         args.num_heads,
         args.num_attention_layers,
         activation_function,
+        args.attention_sparsity_type,
+        args.attention_sparsity_param
     ).to(args.device)
 elif args.model == "dqnr":
     model = DQNR(
@@ -456,6 +602,24 @@ elif args.model == "dqn":
         env.action_space.n,
         activation_function,
     )
+elif args.model == "stdgn":
+    model = ST_DGN(
+        agent_obs_size,
+        hidden_dim,
+        env.action_space.n,
+        args.num_heads,
+        args.num_attention_layers,
+        activation_function,
+        args.attention_sparsity_type,
+        args.attention_sparsity_param
+    ).to(args.device)
+elif args.model == "tarmac":
+    model = TarMAC(
+        agent_obs_size,
+        hidden_dim,
+        env.action_space.n,
+        activation_function,
+    ).to(args.device)
 else:
     raise ValueError(f"Unknown model type {args.model}")
 
@@ -490,6 +654,8 @@ else:
 if args.eval:
     print(f"Policy: {type(policy).__name__}")
     model.eval()
+    if netmon is not None:
+        netmon.eval()
 
     if isinstance(env.get(), Routing) and args.random_topology:
         env.get().network.seeds = EVAL_SEEDS
@@ -520,6 +686,20 @@ assert (
     args.policy == "trained"
 ), f"Given policy {args.policy} cannot be used for training."
 
+if netmon is None:
+    parameters = list(model.parameters())
+else:
+    parameters = list(model.parameters()) + list(netmon.parameters())
+    if node_aux_size > 0 and args.aux_loss_coeff > 0:
+        aux_model = MLP(
+            node_state_size,
+            (node_state_size, node_aux_size),
+            activation_function,
+            activation_on_output=False,
+        )
+        aux_model = aux_model.to(args.device)
+        parameters = parameters + list(aux_model.parameters())
+
 if model_rnd is not None:
     parameters = list(model.parameters()) + list(model_rnd.parameters())
 else:
@@ -528,7 +708,7 @@ else:
 optimizer = optim.AdamW(parameters, lr=args.lr)
 
 state_len = model.get_state_len() if model_has_state else 0
-
+print(args.seed, args.capacity, n_agents, agent_obs_size, state_len, n_nodes, node_obs_size, node_state_size, node_aux_size, args.replay_half_precision)
 buff = ReplayBuffer(
     args.seed,
     int(args.capacity),
@@ -560,6 +740,9 @@ else:
 
 comment += f"_{type(model).__name__}"
 
+if netmon is not None:
+    comment += "_netmon"
+
 if args.comment != "":
     comment += f"_{args.comment}"
 
@@ -579,6 +762,8 @@ try:
         f"Model type: {type(model).__name__}"
         f"{'' if not model_has_state else ' (stateful)'}"
     )
+    if netmon is not None:
+        print(netmon_summary)
     print(env)
     if model_has_state and args.sequence_length <= 1:
         print("Warning: Training stateful model with sequence length 1.")
@@ -600,6 +785,8 @@ try:
         disable=args.disable_progressbar,
     ):
         model.eval()
+        if netmon is not None:
+            netmon.eval()
 
         if episode_step is None or episode_done:
             # reset episode
@@ -614,6 +801,16 @@ try:
         # set the current state
         if model_has_state:
             model.state = last_state
+        
+        if netmon is not None:
+            buffer_node_state = (
+                env.last_netmon_state.cpu().detach().numpy()
+                if env.last_netmon_state is not None
+                else 0
+            )
+            netmon_info = env.get_netmon_info()
+            if hasattr(env, "get_node_aux"):
+                buffer_node_aux = env.get_node_aux()
 
         # get actions and execute step in environment (note: changes model states)
         joint_actions = policy(obs, adj)
@@ -627,6 +824,9 @@ try:
                 1, -1, 1
             )
             last_state = model.state * done_mask
+        
+        if netmon is not None:
+            next_netmon_info = env.get_netmon_info()
 
         episode_step += 1
         episode_done = episode_step >= args.episode_steps
@@ -666,7 +866,16 @@ try:
             base_path = Path(writer.get_logdir())
             if args.debug_plots:
     
-                if isinstance(env, Routing):
+                if netmon is not None:
+                    buff.save_node_state_diff_plot(
+                        base_path / f"z_img_node_diff_{step}.png",
+                        buffer_plot_last_n,
+                    )
+                    buff.save_node_state_std_plot(
+                        base_path / f"z_img_node_std_{step}.png", buffer_plot_last_n
+                    )
+                if (netmon is not None and isinstance(env.env, Routing)) or isinstance(
+                    env, Routing):
                     if env.record_distance_map:
                         env.save_distance_map_plot(
                             base_path / f"z_img_spawn_distance_{step}.png"
@@ -740,6 +949,8 @@ try:
         if step % log_buffer_size == 0: args.intr_reward_decay*=args.intr_reward_decay
 
         model.train()
+        if netmon is not None:
+            netmon.train()
         if model_rnd is not None:
             model_rnd.train()
 
@@ -753,6 +964,50 @@ try:
             if model_has_state and t == 0:
                 # load the state from the beginning
                 model.state = batch.agent_state
+            
+            if netmon is not None:
+                if t == 0:
+                    # get state from batch
+                    netmon.state = batch.node_state
+                else:
+                    # reset netmon state if env episode was done in this step
+                    netmon.state = last_netmon_state * (  # noqa: F821
+                        ~last_batch_episode_done  # noqa: F821
+                    ).view(-1, 1, 1)
+
+                    # replace node state with newly calculated netmon state
+                    # buff.node_state[batch.idx] = netmon.state.detach().cpu().numpy()
+
+                # run netmon step
+                network_obs = netmon(
+                    batch.node_obs, batch.node_adj, batch.node_agent_matrix
+                )
+
+                # netmon aux loss
+                if aux_model is not None:
+                    aux_prediction = aux_model(netmon.state)
+                    loss_aux = (
+                        loss_aux
+                        + torch.mean((aux_prediction - batch.node_aux) ** 2)
+                        / args.sequence_length
+                    )
+
+                # replace observation in place
+                net_obs_dim = network_obs.shape[-1]
+                batch.obs[:, :, -net_obs_dim:] = network_obs
+
+                # if t > 0:
+                #     # update buffer
+                #     # buff.next_obs[prev_idx][..., -net_obs_dim:] = (
+                #     #     network_obs.detach().cpu().numpy()
+                #     # )
+                #     buff.next_obs[last_batch_idx] = batch.obs.detach().cpu().numpy()
+
+                # remember true netmon state for gradient calculation
+                last_netmon_state = netmon.state
+                # done episodes for correct masking
+                last_batch_episode_done = batch.episode_done
+                last_batch_idx = batch.idx
 
             q_values = model(batch.obs, batch.adj)
 
@@ -762,6 +1017,19 @@ try:
                     # hack: set state of target model to next state of current model
                     # with this, we avoid having to store state & next state
                     model_tar.state = model.state.detach()
+                
+                if netmon is not None:
+                    # note that we use the netmon state from the current model here.
+                    # not sure if that is really necessary, we could also save the
+                    # next state in the transition tuple and predict current & next
+                    # network observations with a single netmon invocation.
+                    next_network_obs = netmon(
+                        batch.next_node_obs,
+                        batch.next_node_adj,
+                        batch.next_node_agent_matrix,
+                    )
+                    next_net_obs_dim = next_network_obs.shape[-1]
+                    batch.next_obs[:, :, -next_net_obs_dim:] = next_network_obs
             
                 next_q = model_tar(batch.next_obs, batch.next_adj)
                 next_q_max = next_q.max(dim=2)[0]
@@ -862,11 +1130,11 @@ try:
             loss_q
             + args.att_regularization_coeff * loss_att
             + args.aux_loss_coeff * loss_aux
-            + loss_intr
+            + args.intr_loss_coeff * loss_intr
         )
 
         print("losses: ", loss_q, loss_att, loss_intr)
-        print("rewards: ", normalized_r_intrinsic_per_agent.mean().mean())
+        print("rewards: ", combined_reward.mean().mean(), normalized_r_intrinsic_per_agent.mean().mean())
         print("\n")
 
         optimizer.zero_grad()
@@ -913,7 +1181,8 @@ finally:
             # first reset model & netmon state
             if hasattr(model, "state"):
                 model.state = None
-
+            if netmon is not None:
+                netmon.state = None
             # evaluate
             if isinstance(env.get(), Routing) and args.random_topology:
                 env.get().network.seeds = EVAL_SEEDS

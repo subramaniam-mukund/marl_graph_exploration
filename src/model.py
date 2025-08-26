@@ -92,8 +92,11 @@ class AttModel(nn.Module):
         num_heads,
         activation_fn,
         vkq_activation_fn,
+        sparsity_type=None,  # e.g., 'topk', 'threshold'
+        sparsity_param=None, # e.g., k for topk, threshold value for threshold
     ):
         super(AttModel, self).__init__()
+        # ... (existing init parameters)
         self.k_features = k_features
         self.v_features = v_features
         self.num_heads = num_heads
@@ -103,15 +106,18 @@ class AttModel(nn.Module):
         self.fc_out = nn.Linear(v_features * num_heads, out_features)
         self.activation_fn = activation_fn
         self.vkq_activation_fn = vkq_activation_fn
-
-        # attention scaling factor 1 / sqrt(d_k) from "Attention is All You Need"
         self.attention_scale = 1 / (k_features**0.5)
+
+        # Sparsity parameters
+        self.sparsity_type = sparsity_type
+        # For topk, sparsity_param should be an integer (or float that will be cast to int)
+        # For threshold, sparsity_param should be a float
+        self.sparsity_param = sparsity_param
+
 
     def forward(self, x, mask):
         batch_size, num_agents = x.shape[0], x.shape[1]
 
-        # get values, queries and keys and view according to heads
-        # difference to DQN: we use a linear mapping here, as in the Transformer paper
         v = self.fc_v(x).view(batch_size, num_agents, self.num_heads, self.v_features)
         q = self.fc_q(x).view(batch_size, num_agents, self.num_heads, self.k_features)
         k = self.fc_k(x).view(batch_size, num_agents, self.num_heads, self.k_features)
@@ -121,27 +127,72 @@ class AttModel(nn.Module):
             q = self.vkq_activation_fn(q)
             k = self.vkq_activation_fn(k)
 
-        # permute for batch multiplication over batch size and heads
+        # Permute for batch multiplication over batch size and heads
+        # q, k, v shape: (batch_size, num_heads, num_agents, features_per_head)
         q, k, v = q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2)
 
-        # add head axis (mask is the same for all heads)
+        # Add head axis to mask (mask is the same for all heads)
+        # mask shape: (batch_size, 1, num_agents, num_agents)
         mask = mask.unsqueeze(1)
 
-        # calculate attention as dot product of all queries with all keys
-        # according to mask and softmax over last dimension
-        att_weights = torch.matmul(q, k.transpose(2, 3)) * self.attention_scale
-        att = att_weights.masked_fill(mask == 0, -1e9)
-        att = F.softmax(att, dim=-1)
+        # Calculate raw attention scores (logits)
+        # att_logits shape: (batch_size, num_heads, num_agents, num_agents)
+        att_logits = torch.matmul(q, k.transpose(2, 3)) * self.attention_scale
 
-        # combine values according to attention
-        out = torch.matmul(att, v)
-        # skip connection
+        # 1. Apply original adjacency mask
+        # This sets scores for non-neighbors to a very low value, so they become 0 after softmax
+        att_masked_by_adj = att_logits.masked_fill(mask == 0, -1e9)
+
+        # 2. Apply Top-K Sparsity (among valid neighbors)
+        if self.sparsity_type == 'topk' and self.sparsity_param is not None:
+            # Ensure k is an integer
+            k_val = int(self.sparsity_param)
+
+            # Get the top-k values along the last dimension (num_agents, i.e., potential neighbors)
+            # For each query (source agent), for each head, for each batch item, find top-k neighbors
+            # The .values are the scores, .indices are the indices of the top-k neighbors
+            # shape of topk_values/indices: (batch_size, num_heads, num_agents, k_val)
+            # Note: The `min(k_val, att_masked_by_adj.shape[-1])` ensures k doesn't exceed the dimension size.
+            # It also handles cases where a node has fewer than k neighbors, correctly taking all of them.
+            topk_values, topk_indices = torch.topk(att_masked_by_adj, k=min(k_val, att_masked_by_adj.shape[-1]), dim=-1)
+
+            # Create a sparse mask from the top-k indices
+            # `torch.zeros_like(att_masked_by_adj)` creates a tensor of zeros with the same shape
+            # `scatter_(-1, topk_indices, 1)` places `1` at the `topk_indices` along the last dimension
+            sparse_topk_mask = torch.zeros_like(att_masked_by_adj, dtype=torch.bool).scatter_(-1, topk_indices, True)
+
+            # Mask out everything that is NOT in the top-k set (including those already masked by adjacency)
+            # Only keep the values that are in sparse_topk_mask AND were valid neighbors according to mask
+            att = att_masked_by_adj.masked_fill(~sparse_topk_mask, -1e9)
+
+        elif self.sparsity_type == 'threshold' and self.sparsity_param is not None:
+            # Mask based on threshold after adjacency mask
+            threshold_mask = (att_masked_by_adj >= self.sparsity_param)
+            att = att_masked_by_adj.masked_fill(~threshold_mask, -1e9)
+        else:
+            # No additional sparsity beyond adjacency mask
+            att = att_masked_by_adj
+
+        # 3. Apply Softmax to get attention probabilities
+        # Important: Softmax needs to be applied AFTER all masking for proper probability distribution
+        att_probs = F.softmax(att, dim=-1)
+
+        # Combine values according to attention probabilities
+        # out shape: (batch_size, num_heads, num_agents, v_features)
+        out = torch.matmul(att_probs, v)
+
+        # Skip connection
         out = torch.add(out, v)
-        # undo transpose and concatenate all heads
+
+        # Undo transpose and concatenate all heads
+        # out shape: (batch_size, num_agents, num_heads * v_features)
         out = out.transpose(1, 2).contiguous().view(batch_size, num_agents, -1)
 
+        # Final linear layer and activation
         out = self.activation_fn(self.fc_out(out))
-        return out, att_weights
+
+        # Return original attention logits (for KL regularization) and attention probabilities (for entropy)
+        return out, att_logits
 
 
 class Q_Net(nn.Module):
@@ -176,6 +227,8 @@ class DGN(nn.Module):
         num_heads,
         num_attention_layers,
         activation_fn,
+        sparsity_type=None,
+        sparsity_param=None
     ):
         """
         Implementation of "Graph Convolutional Reinforcement Learning"
@@ -205,6 +258,8 @@ class DGN(nn.Module):
                     activation_fn,
                     # official implementation uses act function for key/query/value
                     activation_fn,
+                    sparsity_type,
+                    sparsity_param
                 )
             )
 
@@ -214,15 +269,14 @@ class DGN(nn.Module):
 
     def forward(self, x, mask):
         h = self.encoder(x)
-        # x.shape: torch.Size([1, 20, 130]), mask.shape: torch.Size([1, 20, 20]), h.shape: torch.Size([1, 20, 256])
         q_input = h
         self.att_weights.clear()
         for attention_layer in self.att_layers:
-            h, att_weights = attention_layer(h, mask)
+            h, att_weights,  = attention_layer(h, mask)
             self.att_weights.append(att_weights)
             # concatenate outputs like described in the paper & official implementation
             q_input = torch.cat((q_input, h), dim=-1)
-            self.hidden = h # torch.Size([1, 20, 256]) (batch_size, num_agents, hidden_dim)
+        self.hidden = h
         q = self.q_net(q_input)
         return q
 
@@ -835,3 +889,171 @@ class CommNet(DQNR):
         # manually reshape state in the end
         self._state_reshape_out(batch_size, n_agents)
         return self.q_net(h)
+
+class ST_DGN(DQNR):
+    """
+    Spatio-Temporal DGN that inherits from DQNR to reuse its state management.
+    
+    This model implements the RNN -> GNN workflow:
+    1. It uses the parent's _lstm_forward to update the memory state.
+    2. It then uses its GAT layers to communicate these memory states spatially.
+    """
+    def __init__(
+        self,
+        in_features,
+        mlp_units,
+        num_actions,
+        num_heads,
+        num_attention_layers,
+        activation_fn,
+        sparsity_type=None,
+        sparsity_param=None
+    ):
+        # Initialize the parent DQNR class
+        super().__init__(in_features, mlp_units, num_actions, activation_fn)
+        
+        # The encoder and lstm cell are already created by the parent.
+        hidden_features = self.encoder.out_features
+
+        # Add the ST_DGN specific layers (Graph Attention)
+        self.att_layers = nn.ModuleList()
+        for _ in range(num_attention_layers):
+            self.att_layers.append(
+                AttModel(
+                    hidden_features,
+                    16, 16,  # k_features, v_features
+                    hidden_features,
+                    num_heads,
+                    activation_fn,
+                    activation_fn,
+                    sparsity_type,
+                    sparsity_param
+                )
+            )
+
+        # Redefine the Q-network to handle the concatenated input from all layers
+        # (initial memory state + output of each attention layer)
+        q_net_in_features = hidden_features * (num_attention_layers + 1)
+        self.q_net = Q_Net(q_net_in_features, num_actions)
+        
+        # To store attention weights for analysis
+        self.att_weights = []
+
+    def forward(self, x, mask):
+        
+        # 1. Encode the current raw observation
+        h = self.encoder(x)
+
+        # 2. Update the hidden state (memory) with the new observation
+        #    This reuses the state management logic from the parent DQNR class.
+        #    It handles initialization and updates `self.state` internally.
+        #    `h` is now the temporally-aware memory state for each agent.
+        h = self._lstm_forward(h)
+
+        # 3. Communicate these memory states spatially using Graph Attention
+        q_input = h  # The initial memory state is the first input to the Q-Net
+        self.att_weights.clear()
+        
+        for attention_layer in self.att_layers:
+            # The GAT layer operates on the memory states `h`
+            h, att_logits = attention_layer(h, mask)
+            self.att_weights.append(att_logits)
+            # Concatenate outputs like in the original DGN
+            h = self._lstm_forward(h)
+            q_input = torch.cat((q_input, h), dim=-1)
+
+
+        self.hidden = h
+        # 4. Calculate Q-values from the final spatio-temporal representation
+        q = self.q_net(q_input)
+        
+        return q
+
+
+# ----------------------------------------------------------------------------------
+# -- NEW MODELS: TarMAC
+# ----------------------------------------------------------------------------------
+
+class TarMAC_Attention(nn.Module):
+    """
+    Helper module for the Targeted Attention mechanism in TarMAC.
+    Computes attention scores based on key-signature matching.
+    """
+    def __init__(self, hidden_features, key_size):
+        super(TarMAC_Attention, self).__init__()
+        self.key_size = key_size
+        # Linear layers to generate keys and signatures from hidden states
+        self.fc_k = nn.Linear(hidden_features, key_size)
+        self.fc_s = nn.Linear(hidden_features, key_size)
+        self.attention_scale = 1 / (key_size**0.5)
+
+    def forward(self, h, comm_mask):
+        # h shape: (batch_size, num_agents, hidden_features)
+        # comm_mask shape: (batch_size, num_agents, num_agents)
+
+        # Generate keys and signatures for all agents
+        keys = self.fc_k(h)      # (batch_size, num_agents, key_size)
+        signatures = self.fc_s(h) # (batch_size, num_agents, key_size)
+
+        # Compute raw attention scores (logits) via batch matrix multiplication
+        # att_logits shape: (batch_size, num_agents, num_agents)
+        att_logits = torch.bmm(keys, signatures.transpose(1, 2)) * self.attention_scale
+
+        # Apply communication mask to prevent attention to non-neighbors
+        att_masked = att_logits.masked_fill(comm_mask == 0, -1e9)
+
+        # Apply softmax to get attention probabilities
+        att_probs = F.softmax(att_masked, dim=-1)
+
+        return att_probs
+
+class TarMAC(DQNR):
+    """
+    Implementation of Targeted Multi-Agent Communication (TarMAC)
+    (https://arxiv.org/abs/1810.11187).
+
+    This model uses a recurrent cell to maintain a memory and a targeted
+    attention mechanism to create a communication vector from other agents'
+    messages. It inherits from DQNR to reuse its state management logic.
+    """
+    def __init__(self, in_features, mlp_units, num_actions, activation_fn, key_size=16, msg_size=16):
+        super().__init__(in_features, mlp_units, num_actions, activation_fn)
+        hidden_features = self.encoder.out_features
+
+        # Layer to generate messages from hidden states
+        self.fc_msg = nn.Linear(hidden_features, msg_size)
+
+        # The targeted attention mechanism
+        self.attention = TarMAC_Attention(hidden_features, key_size)
+
+        # Redefine the Q-network to take the hidden state + communication vector
+        self.q_net = Q_Net(hidden_features + msg_size, num_actions)
+
+    def forward(self, x, mask):
+        # 1. Encode the current raw observation
+        h_encoded = self.encoder(x)
+
+        # 2. Update the hidden state (memory) with the new observation
+        # This reuses the state management from DQNR.
+        # `h` is now the temporally-aware memory state for each agent.
+        h = self._lstm_forward(h_encoded)
+
+        # 3. Generate messages from the current hidden state
+        messages = self.fc_msg(h) # (batch_size, num_agents, msg_size)
+
+        # 4. Compute attention weights over other agents
+        # The mask here determines who can communicate with whom.
+        # In a routing env, this is typically the adjacency matrix.
+        att_probs = self.attention(h, mask) # (batch_size, num_agents, num_agents)
+
+        # 5. Create the communication vector (context) by aggregating messages
+        # c_i = sum_j (att_ij * msg_j)
+        context = torch.bmm(att_probs, messages)
+
+        # 6. Concatenate the agent's own state with the communication context
+        q_input = torch.cat([h, context], dim=-1)
+
+        # 7. Calculate Q-values
+        q = self.q_net(q_input)
+
+        return q

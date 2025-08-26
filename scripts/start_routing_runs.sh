@@ -1,8 +1,8 @@
 #!/bin/bash
-#PBS -l select=1:ncpus=1:ngpus=1:mem=48gb
-#PBS -l walltime=03:00:00
-#PBS -o /rds/general/user/mss124/home/thesis/job_o
-#PBS -e /rds/general/user/mss124/home/thesis/job_e
+#PBS -l select=1:ncpus=1:ngpus=1:mem=80gb
+#PBS -l walltime=48:00:00
+#PBS -o /rds/general/user/mss124/home/thesis/marl_graph_exploration/job_o
+#PBS -e /rds/general/user/mss124/home/thesis/marl_graph_exploration/job_e
 
 cd "$PBS_O_WORKDIR"
 
@@ -24,14 +24,6 @@ DIR_NAME="${DATE}_logs_fixed_baseline"
 
 mkdir -p $DIR_NAME
 
-# create backup of the code
-# git log -n 1 >> $DIR_NAME/git.txt
-# git status >> $DIR_NAME/git.txt
-# git diff >> $DIR_NAME/git.txt
-# cp -r src $DIR_NAME/src
-# copy this script
-# cp $0 $DIR_NAME/$(basename "$0")
-
 run() {
     RUN_NAME="$1"
     shift
@@ -39,11 +31,13 @@ run() {
     (set -x; time python -u src/main.py $RUN_ARGS --comment=${RUN_NAME}) > ${DIR_NAME}/${RUN_NAME}.log 2>&1
 }
 
+SELECTED_SEEDS=$(python -c "from src.env.constants_degree4 import SELECTED_SEEDS; print(*SELECTED_SEEDS)")
+
 time (
 # Graphs G_A, G_B, G_C, selected
-for seed in 971182936 923430603 1704443687 324821133
+for seed in $SELECTED_SEEDS
 do
-for i in 0 1 2
+for i in 0
 do
 #run "fixed-nocong-shortest-paths-eval-t$seed-$i" --policy=heuristic --eval --seed=$i --no-congestion --topology-init-seed=$seed --train-topology-allow-eval-seed --episode-steps=300 --random-topology=0 --disable-progressbar --eval-output-dir=${DIR_NAME}/fixed-nocong-shortest-paths-eval-t$seed-$i/eval
 #run "fixed-nocong-dqn-t$seed-$i" --seed=$i --no-congestion --topology-init-seed=$seed --train-topology-allow-eval-seed --episode-steps=300 --model=dqn --random-topology=0 $BASE_PARAMS $LIMITS
@@ -51,11 +45,11 @@ do
 #run "fixed-nocong-commnet-t$seed-$i" --seed=$i --no-congestion --topology-init-seed=$seed --train-topology-allow-eval-seed --episode-steps=300 --model=commnet --random-topology=0 $BASE_PARAMS $RECURRENT $LIMITS
 #run "fixed-nocong-dgn-t$seed-$i" --seed=$i --no-congestion --topology-init-seed=$seed --train-topology-allow-eval-seed --episode-steps=300 --model=dgn --random-topology=0 $BASE_PARAMS $LIMITS
 
-run "fixed-shortest-paths-eval-t$seed-$i" --policy=heuristic --eval --seed=$i --topology-init-seed=$seed --train-topology-allow-eval-seed --episode-steps=300 --random-topology=0 --disable-progressbar --eval-output-dir=${DIR_NAME}/fixed-shortest-paths-eval-t$seed-$i/eval
-run "fixed-dqn-t$seed-$i" --seed=$i --topology-init-seed=$seed --train-topology-allow-eval-seed --episode-steps=300 --model=dqn --random-topology=0 $BASE_PARAMS $LIMITS
-run "fixed-dqnr-t$seed-$i" --seed=$i --topology-init-seed=$seed --train-topology-allow-eval-seed --episode-steps=300 --model=dqnr --random-topology=0 $BASE_PARAMS $RECURRENT $LIMITS
-run "fixed-commnet-t$seed-$i" --seed=$i --topology-init-seed=$seed --train-topology-allow-eval-seed --episode-steps=300 --model=commnet --random-topology=0 $BASE_PARAMS $RECURRENT $LIMITS
-run "fixed-dgn-t$seed-$i" --seed=$i --topology-init-seed=$seed --train-topology-allow-eval-seed --episode-steps=300 --model=dgn --random-topology=0 $BASE_PARAMS $LIMITS
+run "fixed-shortest-paths-eval-t$seed-$i" --policy=heuristic --eval --seed=$i --topology-init-seed=$seed --train-topology-allow-eval-seed --episode-steps=300 --random-topology=0 --disable-progressbar --n-data=20 --n-router=20 --enable-link-failures=False --link-failure-rate=0 --degree=4 --eval-output-dir=${DIR_NAME}/fixed-shortest-paths-eval-t$seed-$i/eval
+run "fixed-dqn-t$seed-$i" --seed=$i --topology-init-seed=$seed --train-topology-allow-eval-seed --episode-steps=300 --model=dqn --random-topology=0 --n-data=20 --n-router=20 --enable-link-failures=False --link-failure-rate=0 --degree=4 $BASE_PARAMS $LIMITS
+run "fixed-dqnr-t$seed-$i" --seed=$i --topology-init-seed=$seed --train-topology-allow-eval-seed --episode-steps=300 --model=dqnr --random-topology=0 --n-data=20 --n-router=20 --enable-link-failures=False --link-failure-rate=0 --degree=4 $BASE_PARAMS $RECURRENT $LIMITS
+run "fixed-commnet-t$seed-$i" --seed=$i --topology-init-seed=$seed --train-topology-allow-eval-seed --episode-steps=300 --model=commnet --random-topology=0 --n-data=20 --n-router=20 --enable-link-failures=False --link-failure-rate=0 --degree=4 $BASE_PARAMS $RECURRENT $LIMITS
+run "fixed-dgn-t$seed-$i" --seed=$i --topology-init-seed=$seed --train-topology-allow-eval-seed --episode-steps=300 --model=dgn --random-topology=0 --n-data=20 --n-router=20 --enable-link-failures=False --link-failure-rate=0 --degree=4 $BASE_PARAMS $LIMITS
 done
 done
 )
