@@ -1,6 +1,6 @@
 #!/bin/bash
-#PBS -l select=1:ncpus=1:ngpus=4:mem=20gb
-#PBS -l walltime=6:30:00
+#PBS -l select=1:ncpus=1:ngpus=1:mem=20gb
+#PBS -l walltime=15:00:00
 #PBS -o /rds/general/user/mss124/home/thesis/marl_graph_exploration/job_o
 #PBS -e /rds/general/user/mss124/home/thesis/marl_graph_exploration/job_e
 
@@ -34,27 +34,19 @@ SELECTED_SEEDS=$(python -c "from src.env.constants_degree4 import SELECTED_SEEDS
 
 time (
 # Graphs G_A, G_B, G_C, selected
-for seed in 139608511
+for seed in $SELECTED_SEEDS
 do
   for i in 0
   do
-    for nh in 2 4 5
-    do
-      for loss_coeff in .1 1 5 10
-      do
-        run "fixed-dgn-t${seed}-intr${INTRINSIC_COEFF}-${i}" \
-          --seed=$i \
-          --topology-init-seed=$seed \
-          --train-topology-allow-eval-seed \
-          --episode-steps=300 \
-          --model=dgn \
-          --random-topology=0 \
-          --num-heads=$nh \
-          --intrinsic-coeff=1 \
-          --intr-loss-coeff=$loss_coeff \
-          --rnd-network=True --n-data=20 --n-router=20 --intr-reward-decay=.99 --enable-link-failures=True --link-failure-rate=.01 --degree=4 $BASE_PARAMS $LIMITS
-      done
-    done
+    run "fixed-dgn-t${seed}-intr${INTRINSIC_COEFF}-${i}-${intr_coeff}-${loss_coeff}" \
+      --seed=$i \
+      --topology-init-seed=$seed \
+      --train-topology-allow-eval-seed \
+      --episode-steps=300 \
+      --model=dgn \
+      --random-topology=0 \
+      --num-heads=4 \
+      --n-data=20 --n-router=20 --enable-link-failures=True --link-failure-rate=.01 --degree=4 $BASE_PARAMS $LIMITS
   done
 done
 )

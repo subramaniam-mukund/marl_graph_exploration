@@ -45,11 +45,11 @@ do
 #run "fixed-nocong-commnet-t$seed-$i" --seed=$i --no-congestion --topology-init-seed=$seed --train-topology-allow-eval-seed --episode-steps=300 --model=commnet --random-topology=0 $BASE_PARAMS $RECURRENT $LIMITS
 #run "fixed-nocong-dgn-t$seed-$i" --seed=$i --no-congestion --topology-init-seed=$seed --train-topology-allow-eval-seed --episode-steps=300 --model=dgn --random-topology=0 $BASE_PARAMS $LIMITS
 
-run "fixed-shortest-paths-eval-t$seed-$i" --policy=heuristic --eval --seed=$i --topology-init-seed=$seed --train-topology-allow-eval-seed --episode-steps=300 --random-topology=0 --disable-progressbar --n-data=20 --n-router=20 --enable-link-failures=False --link-failure-rate=0 --degree=4 --eval-output-dir=${DIR_NAME}/fixed-shortest-paths-eval-t$seed-$i/eval
-run "fixed-dqn-t$seed-$i" --seed=$i --topology-init-seed=$seed --train-topology-allow-eval-seed --episode-steps=300 --model=dqn --random-topology=0 --n-data=20 --n-router=20 --enable-link-failures=False --link-failure-rate=0 --degree=4 $BASE_PARAMS $LIMITS
-run "fixed-dqnr-t$seed-$i" --seed=$i --topology-init-seed=$seed --train-topology-allow-eval-seed --episode-steps=300 --model=dqnr --random-topology=0 --n-data=20 --n-router=20 --enable-link-failures=False --link-failure-rate=0 --degree=4 $BASE_PARAMS $RECURRENT $LIMITS
-run "fixed-commnet-t$seed-$i" --seed=$i --topology-init-seed=$seed --train-topology-allow-eval-seed --episode-steps=300 --model=commnet --random-topology=0 --n-data=20 --n-router=20 --enable-link-failures=False --link-failure-rate=0 --degree=4 $BASE_PARAMS $RECURRENT $LIMITS
-run "fixed-dgn-t$seed-$i" --seed=$i --topology-init-seed=$seed --train-topology-allow-eval-seed --episode-steps=300 --model=dgn --random-topology=0 --n-data=20 --n-router=20 --enable-link-failures=False --link-failure-rate=0 --degree=4 $BASE_PARAMS $LIMITS
+run "fixed-shortest-paths-eval-t$seed-$i" --policy=heuristic --eval --seed=$i --topology-init-seed=$seed --train-topology-allow-eval-seed --episode-steps=300 --random-topology=0 --disable-progressbar --n-data=20 --n-router=20 --enable-link-failures=True --link-failure-rate=.01 --degree=4 --eval-output-dir=${DIR_NAME}/fixed-shortest-paths-eval-t$seed-$i/eval
+run "fixed-dqn-t$seed-$i" --seed=$i --topology-init-seed=$seed --train-topology-allow-eval-seed --episode-steps=300 --model=dqn --random-topology=0 --n-data=20 --n-router=20 --enable-link-failures=True --link-failure-rate=.01 --degree=4 $BASE_PARAMS $LIMITS
+run "fixed-dqnr-t$seed-$i" --seed=$i --topology-init-seed=$seed --train-topology-allow-eval-seed --episode-steps=300 --model=dqnr --random-topology=0 --n-data=20 --n-router=20 --enable-link-failures=True --link-failure-rate=.01 --degree=4 $BASE_PARAMS $RECURRENT $LIMITS
+#run "fixed-commnet-t$seed-$i" --seed=$i --topology-init-seed=$seed --train-topology-allow-eval-seed --episode-steps=300 --model=commnet --random-topology=0 --n-data=20 --n-router=20 --enable-link-failures=False --link-failure-rate=0 --degree=4 $BASE_PARAMS $RECURRENT $LIMITS
+#run "fixed-dgn-t$seed-$i" --seed=$i --topology-init-seed=$seed --train-topology-allow-eval-seed --episode-steps=300 --model=dgn --random-topology=0 --n-data=20 --n-router=20 --enable-link-failures=False --link-failure-rate=0 --degree=4 $BASE_PARAMS $LIMITS
 done
 done
 )

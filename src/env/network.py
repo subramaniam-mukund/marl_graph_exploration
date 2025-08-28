@@ -269,54 +269,46 @@ class Network:
         # return the seed that was used to create this topology 
         return topology_seed 
 
-    def fail_random_edge(self): # <-- NEW METHOD
-        """ 
-        Fails a single, non-critical link in the network permanently. 
-        A non-critical link (non-bridge) is one whose removal will not 
-        disconnect the graph. 
+    def fail_random_edge(self):
+        """
+        Fails a single, non-critical link by setting its 'failed' flag.
+        A non-critical link (non-bridge) is one whose removal will not
+        disconnect the graph.
 
-        :return: The index of the failed edge, or None if no edges can be failed. 
-        """ 
-        if not nx.is_connected(self.G): 
-            return None 
+        :return: The index of the failed edge, or None if no edges can be failed.
+        """
+        if not nx.is_connected(self.G):
+            return None
 
-        # A "bridge" is an edge whose removal would disconnect the graph. 
-        # We can only remove non-bridge edges. 
-        bridges = set(nx.bridges(self.G)) 
-        potential_edges_to_fail = [] 
-        for i, edge in enumerate(self.edges): 
-            if not edge.failed: 
-                # networkx may store edge tuple as (u, v) or (v, u) 
-                if (edge.start, edge.end) not in bridges and ( 
-                    edge.end, 
-                    edge.start, 
-                ) not in bridges: 
-                    potential_edges_to_fail.append(i) 
+        bridges = set(nx.bridges(self.G))
+        potential_edges_to_fail = []
+        for i, edge in enumerate(self.edges):
+            if not edge.failed:
+                if (edge.start, edge.end) not in bridges and (edge.end, edge.start) not in bridges:
+                    potential_edges_to_fail.append(i)
 
-        if not potential_edges_to_fail: 
-            return None # No safe edges to fail 
+        if not potential_edges_to_fail:
+            return None
 
-        # Choose an edge to fail 
         edge_to_fail_idx = np.random.choice(potential_edges_to_fail)
-        failed_edge = self.edges[edge_to_fail_idx] 
-        u, v = failed_edge.start, failed_edge.end 
+        failed_edge = self.edges[edge_to_fail_idx]
+        u, v = failed_edge.start, failed_edge.end
 
-        # Mark as failed and remove from graph representations 
-        failed_edge.failed = True 
-        self.G.remove_edge(u, v) 
+        # --- MODIFIED LOGIC ---
+        # 1. Mark the edge object as failed
+        failed_edge.failed = True
+        # 2. Remove the edge from the high-level graph used for pathfinding
+        if self.G.has_edge(u, v):
+            self.G.remove_edge(u, v)
+        # DO NOT modify self.nodes[u].edges or self.nodes[u].neighbors anymore.
+        # --- END MODIFICATION ---
 
-        # Update node-level info 
-        self.nodes[u].neighbors.remove(v) 
-        self.nodes[v].neighbors.remove(u) 
-        self.nodes[u].edges.remove(edge_to_fail_idx) 
-        self.nodes[v].edges.remove(edge_to_fail_idx) 
+        # The topology has changed, so we MUST update shortest paths
+        self._update_shortest_paths()
+        self._update_nodes_adjacency()
 
-        # The topology has changed, so we MUST update shortest paths 
-        self._update_shortest_paths() 
-        self._update_nodes_adjacency() 
-
-        print(f"INFO: Link {u}-{v} (Edge {edge_to_fail_idx}) has failed.") 
-        return edge_to_fail_idx 
+        print(f"INFO: Link {u}-{v} (Edge {edge_to_fail_idx}) has failed.")
+        return edge_to_fail_idx
 
     def _update_shortest_paths(self): 
         """ 
@@ -429,8 +421,14 @@ class Network:
         """ 
         return self.adj_matrix 
 
-    def _update_nodes_adjacency(self): 
-        self.adj_matrix = np.eye(self.n_nodes, self.n_nodes, dtype=np.int8) 
-        for i in range(self.n_nodes): 
-            for neighbor in self.nodes[i].neighbors: 
-                self.adj_matrix[i][neighbor] = 1
+    def _update_nodes_adjacency(self):
+        self.adj_matrix = np.eye(self.n_nodes, self.n_nodes, dtype=np.int8)
+        for i in range(self.n_nodes):
+            # --- MODIFIED LOGIC ---
+            # Iterate through the original, stable list of edge connections
+            for edge_id in self.nodes[i].edges:
+                # Only add an adjacency if the edge has NOT failed
+                if not self.edges[edge_id].failed:
+                    neighbor = self.edges[edge_id].get_other_node(i)
+                    self.adj_matrix[i][neighbor] = 1
+            # --- END MODIFICATION ---

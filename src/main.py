@@ -708,7 +708,7 @@ else:
 optimizer = optim.AdamW(parameters, lr=args.lr)
 
 state_len = model.get_state_len() if model_has_state else 0
-print(args.seed, args.capacity, n_agents, agent_obs_size, state_len, n_nodes, node_obs_size, node_state_size, node_aux_size, args.replay_half_precision)
+
 buff = ReplayBuffer(
     args.seed,
     int(args.capacity),
@@ -946,11 +946,12 @@ try:
         loss_intr = torch.zeros(1, device=args.device)
         r_intrinsic_per_agent = torch.zeros(1, device=args.device)
         normalized_r_intrinsic_per_agent = torch.zeros(1, device=args.device)
-        if step % log_buffer_size == 0: args.intr_reward_decay*=args.intr_reward_decay
+        if step % log_buffer_size == 0: args.intrinsic_coeff*=args.intr_reward_decay
 
         model.train()
         if netmon is not None:
             netmon.train()
+            
         if model_rnd is not None:
             model_rnd.train()
 
@@ -1034,28 +1035,27 @@ try:
                 next_q = model_tar(batch.next_obs, batch.next_adj)
                 next_q_max = next_q.max(dim=2)[0]
 
-                if args.rnd_network:
+            if args.rnd_network:
+                with torch.no_grad():
                     rnd_target_output = target_model_rnd(model_tar.hidden)
-                    rnd_predictor_output = model_rnd(model_tar.hidden)
+                rnd_predictor_output = model_rnd(model_tar.hidden)
 
-                    # Calculate intrinsic reward: L2 squared distance
-                    # This gives a reward for each agent in the batch
-                    r_intrinsic_per_agent = torch.sum(
-                        torch.pow(rnd_predictor_output - rnd_target_output, 2),
-                        dim=-1
-                    ) # Shape: (batch_size, num_agents)
-                    threshold = args.intrinsic_coeff
-                    intrinsic_reward_rms.update(r_intrinsic_per_agent.detach())
-                    normalized_r_intrinsic_per_agent = (
-                    r_intrinsic_per_agent - intrinsic_reward_rms.mean
-                ) / torch.sqrt(intrinsic_reward_rms.var + 1e-8)
-                    normalized_r_intrinsic_per_agent = torch.clamp(
-            normalized_r_intrinsic_per_agent, min=-1*threshold, max=threshold
-        )
+                # Calculate intrinsic reward: L2 squared distance
+                # This gives a reward for each agent in the batch
+                r_intrinsic_per_agent = torch.sum(
+                    torch.pow(rnd_predictor_output - rnd_target_output, 2),
+                    dim=-1
+                ) # Shape: (batch_size, num_agents)
+                threshold = args.intrinsic_coeff
+                intrinsic_reward_rms.update(r_intrinsic_per_agent.detach())
+                normalized_r_intrinsic_per_agent = (
+                r_intrinsic_per_agent - intrinsic_reward_rms.mean
+            ) / torch.sqrt(intrinsic_reward_rms.var + 1e-8)
+                
 
-                    # This loss is minimized to train the predictor network
-                    rnd_loss = F.mse_loss(rnd_predictor_output, rnd_target_output)
-                    loss_intr = loss_intr + rnd_loss / args.sequence_length
+                # This loss is minimized to train the predictor network
+                rnd_loss = F.mse_loss(rnd_predictor_output, rnd_target_output)
+                loss_intr = loss_intr + rnd_loss / args.sequence_length
 
             if model_has_state:
                 # mask agent state when the next step belongs to a new episode
@@ -1068,7 +1068,7 @@ try:
             # DQN target with 1 step bootstrapping
             # we do not use batch.episode_done here, as the next observation
             # from this transition still belongs to the same episode (i.e. is valid)
-            combined_reward = batch.reward + args.intr_reward_decay * normalized_r_intrinsic_per_agent
+            combined_reward = batch.reward + args.intrinsic_coeff * normalized_r_intrinsic_per_agent
             chosen_action_target_q = (
                 combined_reward + (~batch.done) * args.gamma * next_q_max # Use combined_reward
             )
@@ -1134,7 +1134,7 @@ try:
         )
 
         print("losses: ", loss_q, loss_att, loss_intr)
-        print("rewards: ", combined_reward.mean().mean(), normalized_r_intrinsic_per_agent.mean().mean())
+        print("rewards: ", combined_reward.mean().mean(), (args.intrinsic_coeff * normalized_r_intrinsic_per_agent).mean().mean())
         print("\n")
 
         optimizer.zero_grad()

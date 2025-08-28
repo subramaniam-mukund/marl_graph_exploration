@@ -47,7 +47,11 @@ do
     --episode-steps=300 \
     --model=stdgn \
     --random-topology=0 \
-    --num-heads=2 \
+    --num-heads=4 \
+    --intrinsic-coeff=.1 \
+    --intr-loss-coeff=.01 \
+    --rnd-network=True \
+    --intr-reward-decay=.99 \
     --n-data=20 --n-router=20 --enable-link-failures=True --link-failure-rate=.01 --degree=4 $BASE_PARAMS $RECURRENT $LIMITS
     done
 done

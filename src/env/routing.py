@@ -10,9 +10,9 @@ from util import one_hot_list
 
 
 class Data: 
-    """ 
+    """
     A data packet. 
-    """ 
+    """
 
     def __init__(self, id): 
         self.id = id 
@@ -361,23 +361,30 @@ class Routing(NetworkEnv):
         # --- END LINK FAILURE LOGIC --- 
 
         # handle actions 
-        for i in range(self.n_data): 
-            # agent i controls data packet i 
-            packet = self.data[i] 
-
-            if self.eval_info_enabled: 
-                if packet.edge == -1: 
-                    self.sum_packets_per_node[packet.now] += 1 
-
-            # select outgoing edge (act == 0 is idle) 
-            if packet.edge == -1 and act[i] != 0: 
-                # ADDED: Check if the chosen action is valid for the node's current number of edges
-                if act[i] - 1 >= len(self.network.nodes[packet.now].edges): 
-                    reward[i] -= 0.1 # Penalize for trying an invalid action
-                    print("***** INVALID ACTION CHOSEN *****")
-                    continue # Treat as an idle action and move to the next packet
-
-                t = self.network.nodes[packet.now].edges[act[i] - 1] 
+        for i in range(self.n_data):
+            packet = self.data[i]
+            
+            if packet.edge == -1 and act[i] != 0:
+                # Get the stable, complete list of original edges for this node
+                original_edges = self.network.nodes[packet.now].edges
+                action_edge_index = act[i] - 1
+                
+                # 1. Check if the action index was ever valid
+                if action_edge_index >= len(original_edges):
+                    reward[i] -= 0.1 # This action was always invalid
+                    continue
+                    
+                # 2. Determine the agent's INTENDED edge ID
+                intended_edge_id = original_edges[action_edge_index]
+                
+                # 3. Check the 'failed' flag on that specific edge
+                if self.network.edges[intended_edge_id].failed:
+                    print('***** INVALID ACTION CHOSEN *****')
+                    reward[i] -= 0.2 # PENALTY for choosing a link that just failed
+                    continue
+                
+                # If we reach here, the action is valid.
+                t = intended_edge_id 
 
                 if ( 
                     self.enable_congestion 
@@ -521,7 +528,7 @@ class Routing(NetworkEnv):
                 if n != -1: 
                     # n is (currently) a neighbor of i 
                     adj[i, n] = 1 
-        return adj 
+        return adj
 
     def get_final_info(self, info: dict): 
         agent_steps = self.agent_steps 
