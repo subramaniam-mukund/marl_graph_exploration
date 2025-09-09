@@ -1,4 +1,4 @@
 # marl_graph_exploration
-Improved Exploration and Reward Design for Multi-Agent Reinforcement Learning in Graphs
+"Spatial-Memory" for Curiosity-based Exploration in Graph Multi-Agent Reinforcement Learning
 
-Base Model from https://github.com/jw3il/graph-marl
+Base Routing Environment and Baseline Implementations from https://github.com/jw3il/graph-marl
