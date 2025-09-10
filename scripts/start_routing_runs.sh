@@ -1,6 +1,6 @@
 #!/bin/bash
 #PBS -l select=1:ncpus=1:ngpus=1:mem=80gb
-#PBS -l walltime=48:00:00
+#PBS -l walltime=30:00:00
 #PBS -o /rds/general/user/mss124/home/thesis/marl_graph_exploration/job_o
 #PBS -e /rds/general/user/mss124/home/thesis/marl_graph_exploration/job_e
 
@@ -20,7 +20,7 @@ LIMITS="--step-between-train=10 --total-steps=250_000"
 RECURRENT="--sequence-length=8"
 
 DATE=$(date +%Y%m%d_%H%M%S)
-DIR_NAME="${DATE}_logs_fixed_baseline"
+DIR_NAME="baselines_20agents"
 
 mkdir -p $DIR_NAME
 
@@ -34,22 +34,17 @@ run() {
 SELECTED_SEEDS=$(python -c "from src.env.constants_degree4 import SELECTED_SEEDS; print(*SELECTED_SEEDS)")
 
 time (
-# Graphs G_A, G_B, G_C, selected
 for seed in $SELECTED_SEEDS
 do
 for i in 0
 do
-#run "fixed-nocong-shortest-paths-eval-t$seed-$i" --policy=heuristic --eval --seed=$i --no-congestion --topology-init-seed=$seed --train-topology-allow-eval-seed --episode-steps=300 --random-topology=0 --disable-progressbar --eval-output-dir=${DIR_NAME}/fixed-nocong-shortest-paths-eval-t$seed-$i/eval
-#run "fixed-nocong-dqn-t$seed-$i" --seed=$i --no-congestion --topology-init-seed=$seed --train-topology-allow-eval-seed --episode-steps=300 --model=dqn --random-topology=0 $BASE_PARAMS $LIMITS
-#run "fixed-nocong-dqnr-t$seed-$i" --seed=$i --no-congestion --topology-init-seed=$seed --train-topology-allow-eval-seed --episode-steps=300 --model=dqnr --random-topology=0 $BASE_PARAMS $RECURRENT $LIMITS
-#run "fixed-nocong-commnet-t$seed-$i" --seed=$i --no-congestion --topology-init-seed=$seed --train-topology-allow-eval-seed --episode-steps=300 --model=commnet --random-topology=0 $BASE_PARAMS $RECURRENT $LIMITS
-#run "fixed-nocong-dgn-t$seed-$i" --seed=$i --no-congestion --topology-init-seed=$seed --train-topology-allow-eval-seed --episode-steps=300 --model=dgn --random-topology=0 $BASE_PARAMS $LIMITS
-
 run "fixed-shortest-paths-eval-t$seed-$i" --policy=heuristic --eval --seed=$i --topology-init-seed=$seed --train-topology-allow-eval-seed --episode-steps=300 --random-topology=0 --disable-progressbar --n-data=20 --n-router=20 --enable-link-failures=True --link-failure-rate=.01 --degree=4 --eval-output-dir=${DIR_NAME}/fixed-shortest-paths-eval-t$seed-$i/eval
 run "fixed-dqn-t$seed-$i" --seed=$i --topology-init-seed=$seed --train-topology-allow-eval-seed --episode-steps=300 --model=dqn --random-topology=0 --n-data=20 --n-router=20 --enable-link-failures=True --link-failure-rate=.01 --degree=4 $BASE_PARAMS $LIMITS
 run "fixed-dqnr-t$seed-$i" --seed=$i --topology-init-seed=$seed --train-topology-allow-eval-seed --episode-steps=300 --model=dqnr --random-topology=0 --n-data=20 --n-router=20 --enable-link-failures=True --link-failure-rate=.01 --degree=4 $BASE_PARAMS $RECURRENT $LIMITS
-#run "fixed-commnet-t$seed-$i" --seed=$i --topology-init-seed=$seed --train-topology-allow-eval-seed --episode-steps=300 --model=commnet --random-topology=0 --n-data=20 --n-router=20 --enable-link-failures=False --link-failure-rate=0 --degree=4 $BASE_PARAMS $RECURRENT $LIMITS
-#run "fixed-dgn-t$seed-$i" --seed=$i --topology-init-seed=$seed --train-topology-allow-eval-seed --episode-steps=300 --model=dgn --random-topology=0 --n-data=20 --n-router=20 --enable-link-failures=False --link-failure-rate=0 --degree=4 $BASE_PARAMS $LIMITS
+run "fixed-tarmac-t${seed}-${i}" --seed=$i --topology-init-seed=$seed --train-topology-allow-eval-seed --episode-steps=300 --model=tarmac --random-topology=0 --n-data=20 --n-router=20 --enable-link-failures=True --link-failure-rate=.01 --degree=4 $BASE_PARAMS $RECURRENT $LIMITS
+run "fixed-dgn-t$seed-$i" --seed=$i --topology-init-seed=$seed --train-topology-allow-eval-seed --episode-steps=300 --model=dgn --random-topology=0 --n-data=20 --n-router=20 --enable-link-failures=True --link-failure-rate=.01 --degree=4 $BASE_PARAMS $LIMITS
+run "fixed-stdgn-t${seed}-${i}" --seed=$i --topology-init-seed=$seed --train-topology-allow-eval-seed --episode-steps=300 --model=stdgn --random-topology=0 --num-heads=8 --n-data=20 --n-router=20 --enable-link-failures=True --link-failure-rate=.01 --degree=4 $BASE_PARAMS $RECURRENT $LIMITS
+run "fixed-stdgn+smce-t${seed}-${i}" --seed=$i --topology-init-seed=$seed --train-topology-allow-eval-seed --episode-steps=300 --model=stdgn --random-topology=0 --num-heads=8 --intrinsic-coeff=.1 --intr-loss-coeff=.1 --rnd-network=True --intr-reward-decay=.99 --n-data=20 --n-router=20 --enable-link-failures=True --link-failure-rate=.01 --degree=4 $BASE_PARAMS $RECURRENT $LIMITS
 done
 done
 )

@@ -9,8 +9,6 @@ from env.larger_graph_seeds import larger_EVAL_SEEDS as EVAL_SEEDS
 from env.environment import reset_and_get_sizes
 from env.network import Network
 from env.wrapper import NetMonWrapper
-
-
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -19,7 +17,6 @@ from eval import evaluate
 from replaybuffer import ReplayBuffer
 from model import DGN, DQNR, DQN, CommNet, ST_DGN, RNDNetwork, RunningMeanStd, TarMAC, NetMon, MLP
 from env.routing import Routing
-
 from env.simple_environment import SimpleEnvironment
 from policy import EpsilonGreedy
 from policy import ShortestPath
@@ -272,15 +269,15 @@ parser.add_argument(
     type=str,
     help="Type of attention sparsity to apply (e.g., 'topk', 'threshold'). Set to None for no additional sparsity.",
     dest="attention_sparsity_type",
-    choices=[None, "topk", "threshold"], # None allows no sparsity to be explicitly chosen
-    default=None, # Default to no additional sparsity
+    choices=[None, "topk", "threshold"],
+    default=None,
 )
 parser.add_argument(
     "--attention-sparsity-param",
-    type=float, # Using float to allow for threshold, will cast to int for topk
+    type=float,
     help="Parameter for attention sparsity (e.g., k for topk, threshold value for threshold).",
     dest="attention_sparsity_param",
-    default=None, # No default parameter
+    default=None,
 )
 
 # training settings
@@ -551,13 +548,13 @@ else:
     netmon = None
     n_nodes = node_obs_size = node_state_size = node_aux_size = 0
 
-
+hidden_dim = dim_str_to_list(args.hidden_dim)
 
 # optionally create RNDNetwork
 if args.rnd_network:
-    target_model_rnd = RNDNetwork(256).to(args.device) #change to be hidden dim later
-    model_rnd = RNDNetwork(256).to(args.device) #change to be hidden dim later
-    intrinsic_reward_rms = RunningMeanStd(shape=(n_agents,), device=args.device) # <--- MODIFIED LINE
+    target_model_rnd = RNDNetwork(args.hiddendim[-1]).to(args.device)
+    model_rnd = RNDNetwork(args.hiddendim[-1]).to(args.device)
+    intrinsic_reward_rms = RunningMeanStd(shape=(n_agents,), device=args.device)
 
     for param in target_model_rnd.parameters():
         param.requires_grad = False
@@ -567,7 +564,6 @@ else:
     model_rnd = None
     intrinsic_reward_rms = None
 
-hidden_dim = dim_str_to_list(args.hidden_dim)
 
 if args.model == "dgn":
     model = DGN(
@@ -976,9 +972,6 @@ try:
                         ~last_batch_episode_done  # noqa: F821
                     ).view(-1, 1, 1)
 
-                    # replace node state with newly calculated netmon state
-                    # buff.node_state[batch.idx] = netmon.state.detach().cpu().numpy()
-
                 # run netmon step
                 network_obs = netmon(
                     batch.node_obs, batch.node_adj, batch.node_agent_matrix
@@ -996,13 +989,6 @@ try:
                 # replace observation in place
                 net_obs_dim = network_obs.shape[-1]
                 batch.obs[:, :, -net_obs_dim:] = network_obs
-
-                # if t > 0:
-                #     # update buffer
-                #     # buff.next_obs[prev_idx][..., -net_obs_dim:] = (
-                #     #     network_obs.detach().cpu().numpy()
-                #     # )
-                #     buff.next_obs[last_batch_idx] = batch.obs.detach().cpu().numpy()
 
                 # remember true netmon state for gradient calculation
                 last_netmon_state = netmon.state
@@ -1046,7 +1032,6 @@ try:
                     torch.pow(rnd_predictor_output - rnd_target_output, 2),
                     dim=-1
                 ) # Shape: (batch_size, num_agents)
-                threshold = args.intrinsic_coeff
                 intrinsic_reward_rms.update(r_intrinsic_per_agent.detach())
                 normalized_r_intrinsic_per_agent = (
                 r_intrinsic_per_agent - intrinsic_reward_rms.mean

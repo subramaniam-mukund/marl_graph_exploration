@@ -61,8 +61,8 @@ class Routing(NetworkEnv):
         enable_congestion=True, 
         enable_action_mask=False, 
         ttl=0, 
-        enable_link_failures=False, # <-- ADDED: Parameter to enable failures
-        link_failure_rate=0.0, # <-- ADDED: Probability of a link failing per step
+        enable_link_failures=False,
+        link_failure_rate=0.0,
         num_actions=4,
     ):
         """ 
@@ -345,7 +345,6 @@ class Routing(NetworkEnv):
         spr = [] 
         self.agent_steps += 1 
 
-        # --- LINK FAILURE LOGIC ---
         failed_edge_idx = None 
         if self.enable_link_failures and np.random.random() < self.link_failure_rate: 
             failed_edge_idx = self.network.fail_random_edge() 
@@ -358,7 +357,6 @@ class Routing(NetworkEnv):
                     # Free up its load from the (now failed) edge 
                     self.network.edges[failed_edge_idx].load -= self.data[i].size 
                     self.data[i].edge = -1 # No longer on a valid edge
-        # --- END LINK FAILURE LOGIC --- 
 
         # handle actions 
         for i in range(self.n_data):

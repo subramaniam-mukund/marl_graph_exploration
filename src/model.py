@@ -110,8 +110,6 @@ class AttModel(nn.Module):
 
         # Sparsity parameters
         self.sparsity_type = sparsity_type
-        # For topk, sparsity_param should be an integer (or float that will be cast to int)
-        # For threshold, sparsity_param should be a float
         self.sparsity_param = sparsity_param
 
 
@@ -147,18 +145,7 @@ class AttModel(nn.Module):
         if self.sparsity_type == 'topk' and self.sparsity_param is not None:
             # Ensure k is an integer
             k_val = int(self.sparsity_param)
-
-            # Get the top-k values along the last dimension (num_agents, i.e., potential neighbors)
-            # For each query (source agent), for each head, for each batch item, find top-k neighbors
-            # The .values are the scores, .indices are the indices of the top-k neighbors
-            # shape of topk_values/indices: (batch_size, num_heads, num_agents, k_val)
-            # Note: The `min(k_val, att_masked_by_adj.shape[-1])` ensures k doesn't exceed the dimension size.
-            # It also handles cases where a node has fewer than k neighbors, correctly taking all of them.
             topk_values, topk_indices = torch.topk(att_masked_by_adj, k=min(k_val, att_masked_by_adj.shape[-1]), dim=-1)
-
-            # Create a sparse mask from the top-k indices
-            # `torch.zeros_like(att_masked_by_adj)` creates a tensor of zeros with the same shape
-            # `scatter_(-1, topk_indices, 1)` places `1` at the `topk_indices` along the last dimension
             sparse_topk_mask = torch.zeros_like(att_masked_by_adj, dtype=torch.bool).scatter_(-1, topk_indices, True)
 
             # Mask out everything that is NOT in the top-k set (including those already masked by adjacency)
@@ -205,7 +192,7 @@ class Q_Net(nn.Module):
 
 
 class RNDNetwork(nn.Module):
-    def __init__(self, input_dim, output_dim=16, hidden_dim=128):
+    def __init__(self, input_dim, output_dim=32, hidden_dim=64):
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
@@ -887,14 +874,15 @@ class CommNet(DQNR):
         # manually reshape state in the end
         self._state_reshape_out(batch_size, n_agents)
         return self.q_net(h)
+    
+
+# ----------------------------------------------------------------------------------
+# -- NEW MODELS: ST-DGN and TarMAC
+# ----------------------------------------------------------------------------------
 
 class ST_DGN(DQNR):
     """
     Spatio-Temporal DGN that inherits from DQNR to reuse its state management.
-    
-    This model implements the RNN -> GNN workflow:
-    1. It uses the parent's _lstm_forward to update the memory state.
-    2. It then uses its GAT layers to communicate these memory states spatially.
     """
     def __init__(
         self,
@@ -929,7 +917,6 @@ class ST_DGN(DQNR):
                 )
             )
 
-        # Redefine the Q-network to handle the concatenated input from all layers
         # (initial memory state + output of each attention layer)
         q_net_in_features = hidden_features * (num_attention_layers + 1)
         self.q_net = Q_Net(q_net_in_features, num_actions)
@@ -944,8 +931,6 @@ class ST_DGN(DQNR):
 
         # 2. Update the hidden state (memory) with the new observation
         #    This reuses the state management logic from the parent DQNR class.
-        #    It handles initialization and updates `self.state` internally.
-        #    `h` is now the temporally-aware memory state for each agent.
         h = self._lstm_forward(h)
 
         # 3. Communicate these memory states spatially using Graph Attention
@@ -966,11 +951,7 @@ class ST_DGN(DQNR):
         q = self.q_net(q_input)
         
         return q
-
-
-# ----------------------------------------------------------------------------------
-# -- NEW MODELS: TarMAC
-# ----------------------------------------------------------------------------------
+    
 
 class TarMAC_Attention(nn.Module):
     """
@@ -980,7 +961,7 @@ class TarMAC_Attention(nn.Module):
     def __init__(self, hidden_features, key_size):
         super(TarMAC_Attention, self).__init__()
         self.key_size = key_size
-        # Linear layers to generate keys and signatures from hidden states
+
         self.fc_k = nn.Linear(hidden_features, key_size)
         self.fc_s = nn.Linear(hidden_features, key_size)
         self.attention_scale = 1 / (key_size**0.5)
@@ -1032,20 +1013,15 @@ class TarMAC(DQNR):
         h_encoded = self.encoder(x)
 
         # 2. Update the hidden state (memory) with the new observation
-        # This reuses the state management from DQNR.
-        # `h` is now the temporally-aware memory state for each agent.
         h = self._lstm_forward(h_encoded)
 
         # 3. Generate messages from the current hidden state
         messages = self.fc_msg(h) # (batch_size, num_agents, msg_size)
 
         # 4. Compute attention weights over other agents
-        # The mask here determines who can communicate with whom.
-        # In a routing env, this is typically the adjacency matrix.
         att_probs = self.attention(h, mask) # (batch_size, num_agents, num_agents)
 
         # 5. Create the communication vector (context) by aggregating messages
-        # c_i = sum_j (att_ij * msg_j)
         context = torch.bmm(att_probs, messages)
 
         # 6. Concatenate the agent's own state with the communication context
